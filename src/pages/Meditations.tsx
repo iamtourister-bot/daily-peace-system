@@ -1,0 +1,344 @@
+import { useState } from "react";
+import { useLocation } from "wouter";
+import { motion, AnimatePresence } from "framer-motion";
+import { PageTransition } from "@/components/PageTransition";
+import { Play, X, ChevronRight, Clock, ArrowLeft } from "lucide-react";
+
+const NATURE_IMAGES = {
+  forest: "https://images.unsplash.com/photo-1448375240586-882707db888b?w=800&auto=format&fit=crop&q=80",
+  mountain: "https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?w=800&auto=format&fit=crop&q=80",
+  ocean: "https://images.unsplash.com/photo-1505118380757-91f5f5632de0?w=800&auto=format&fit=crop&q=80",
+  meadow: "https://images.unsplash.com/photo-1490682143684-14369e18dce8?w=800&auto=format&fit=crop&q=80",
+  sunrise: "https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=800&auto=format&fit=crop&q=80",
+};
+
+interface MeditationStep {
+  text: string;
+  duration: number;
+}
+
+interface Meditation {
+  id: string;
+  title: string;
+  subtitle: string;
+  duration: string;
+  image: string;
+  tag: string;
+  intro: string;
+  steps: MeditationStep[];
+}
+
+const MEDITATIONS: Meditation[] = [
+  {
+    id: "morning",
+    title: "Morning Clarity",
+    subtitle: "Start with intention",
+    duration: "7 min",
+    image: NATURE_IMAGES.sunrise,
+    tag: "Morning",
+    intro: "A gentle way to open the day. Let the night release from your body.",
+    steps: [
+      { text: "Find a comfortable position. Let your eyes soften or close gently. Take a moment just to arrive here.", duration: 12000 },
+      { text: "Take three deep breaths. Each exhale is a signal to your body that this is a safe moment.", duration: 12000 },
+      { text: "Notice how your body feels this morning. Heavy? Light? Tense somewhere? Just observe. No need to change anything.", duration: 14000 },
+      { text: "Think of one thing you're stepping into today. Not a list — just one thing. Hold it gently.", duration: 12000 },
+      { text: "Now set a single intention. Not a goal. An intention. How do you want to move through this day?", duration: 14000 },
+      { text: "Breathe in: I am present. Breathe out: I am ready.", duration: 12000 },
+      { text: "When you open your eyes, carry this stillness with you for just the first few minutes of your day.", duration: 12000 },
+    ]
+  },
+  {
+    id: "anxiety",
+    title: "Anxiety Relief",
+    subtitle: "Quiet the storm inside",
+    duration: "10 min",
+    image: NATURE_IMAGES.ocean,
+    tag: "Anxiety",
+    intro: "When your mind is racing, this session helps you return to your body — the one place anxiety cannot fully reach.",
+    steps: [
+      { text: "Wherever you are, place both feet flat on the floor. Feel the ground. It's solid. It's holding you.", duration: 14000 },
+      { text: "Place one hand on your chest. Feel it rise and fall. This is happening. This breath. This moment. Not tomorrow.", duration: 14000 },
+      { text: "Breathe in for 4 counts. Hold for 2. Out for 6. The extended exhale activates your body's calming system.", duration: 16000 },
+      { text: "Your thoughts are not facts. They are electrical signals. They rise and they pass, like weather. You are not the weather.", duration: 14000 },
+      { text: "Name three things you can feel physically right now. The chair. Your clothes. The temperature of the air.", duration: 14000 },
+      { text: "The anxious feeling is not permanent. It has a peak. You've already started descending from it.", duration: 12000 },
+      { text: "Breathe slowly. You don't have to figure anything out right now. Just be here for one more breath.", duration: 14000 },
+      { text: "You are more capable than anxiety tells you. That voice is not the truth. This stillness — this is closer to the truth.", duration: 14000 },
+    ]
+  },
+  {
+    id: "sleep",
+    title: "Sleep Preparation",
+    subtitle: "Let the day dissolve",
+    duration: "15 min",
+    image: NATURE_IMAGES.mountain,
+    tag: "Night",
+    intro: "Your body knows how to sleep. This session helps your mind step aside and let it happen.",
+    steps: [
+      { text: "Lie down if you can. Close your eyes. The day is done. Whatever didn't happen can wait.", duration: 14000 },
+      { text: "Starting with your toes — let them go. Release any tension you've been holding there without knowing.", duration: 14000 },
+      { text: "Your calves... your knees... your thighs. Let them sink into the surface beneath you.", duration: 14000 },
+      { text: "Your lower back, your stomach, your chest. With each exhale, let gravity do the work.", duration: 14000 },
+      { text: "Your hands, your arms, your shoulders. The weight of the day is setting down.", duration: 14000 },
+      { text: "Your jaw. Your forehead. The tiny muscles around your eyes. All of it — soften.", duration: 14000 },
+      { text: "Imagine you're floating in warm, still water. Supported completely. Nothing to hold onto. Nothing to solve.", duration: 16000 },
+      { text: "If thoughts come — and they will — simply notice them and return to the weight of your body.", duration: 14000 },
+      { text: "Your breath is slower now. Your heartbeat is quieter. You are safe. Everything is handled.", duration: 14000 },
+      { text: "There is nothing more to do tonight. Rest is the work now. Let yourself drift.", duration: 14000 },
+    ]
+  },
+  {
+    id: "body",
+    title: "Body Release",
+    subtitle: "Let tension melt away",
+    duration: "8 min",
+    image: NATURE_IMAGES.meadow,
+    tag: "Tension",
+    intro: "We carry emotion in our muscles. This session releases what your body has been holding all day.",
+    steps: [
+      { text: "Sit or lie comfortably. We're going to move through your body systematically — releasing as we go.", duration: 12000 },
+      { text: "Curl your toes tightly for 5 seconds... then release. Feel the difference. That contrast is release.", duration: 14000 },
+      { text: "Tighten your thigh muscles for 5 seconds... squeeze... now let go. The release is the point.", duration: 14000 },
+      { text: "Suck your stomach in tightly... hold it... now exhale and let it all go. Soften your belly completely.", duration: 14000 },
+      { text: "Shrug your shoulders up to your ears, as tight as possible... hold... now drop them. That's where most of us live.", duration: 14000 },
+      { text: "Clench your jaw and scrunch your face tightly... hold... now smooth it out. Let your face be expressionless.", duration: 14000 },
+      { text: "Now scan your whole body. Notice how much lighter it feels. That wasn't just muscle. That was emotion.", duration: 14000 },
+    ]
+  },
+  {
+    id: "peace",
+    title: "Inner Peace",
+    subtitle: "Return to your center",
+    duration: "12 min",
+    image: NATURE_IMAGES.forest,
+    tag: "Deep Calm",
+    intro: "A deeper journey inward. This one is for when you want to remember who you are beneath the noise.",
+    steps: [
+      { text: "Settle in. There's nowhere to be but here. This moment is complete as it is.", duration: 12000 },
+      { text: "Breathe naturally. Don't control it. Just watch your breath rise and fall like a wave you don't need to steer.", duration: 14000 },
+      { text: "Imagine a place where you feel completely at ease. It can be real or imagined. Step into it slowly.", duration: 14000 },
+      { text: "In this place, there is no version of you that needs to perform or achieve. You are enough simply by being.", duration: 16000 },
+      { text: "Notice any tightness in your heart. Old worries. Old grief. Acknowledge them gently — you've been carrying them.", duration: 16000 },
+      { text: "Now imagine setting that weight down. Not abandoning it. Just... resting it for a while.", duration: 14000 },
+      { text: "Who are you without the worry? Without the role you play for others? Sit with that question. Don't answer it.", duration: 16000 },
+      { text: "You have survived everything that has tried to break you. That is not weakness. That is profound strength.", duration: 14000 },
+      { text: "Breathe in: I am enough. Breathe out: I release what I cannot control.", duration: 14000 },
+      { text: "When you return to the world, carry this with you: you have a center. You can always find your way back.", duration: 14000 },
+    ]
+  }
+];
+
+export default function Meditations() {
+  const [, setLocation] = useLocation();
+  const [selected, setSelected] = useState<Meditation | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [stepIndex, setStepIndex] = useState(0);
+  const [done, setDone] = useState(false);
+
+  const startMeditation = (med: Meditation) => {
+    setSelected(med);
+    setPlaying(false);
+    setStepIndex(0);
+    setDone(false);
+  };
+
+  const beginPlaying = () => {
+    setPlaying(true);
+    advanceStep(0, selected!);
+  };
+
+  const advanceStep = (idx: number, med: Meditation) => {
+    if (idx >= med.steps.length) {
+      setDone(true);
+      setPlaying(false);
+      return;
+    }
+    setStepIndex(idx);
+    setTimeout(() => advanceStep(idx + 1, med), med.steps[idx].duration);
+  };
+
+  const exitMeditation = () => {
+    setSelected(null);
+    setPlaying(false);
+    setStepIndex(0);
+    setDone(false);
+  };
+
+  if (selected && playing) {
+    return (
+      <div className="flex flex-col min-h-[100dvh] relative overflow-hidden">
+        <div
+          className="absolute inset-0 bg-cover bg-center"
+          style={{ backgroundImage: `url(${selected.image})` }}
+        />
+        <div className="absolute inset-0 bg-black/60" />
+
+        <button
+          onClick={exitMeditation}
+          className="absolute top-6 right-6 z-20 p-2 text-white/70 hover:text-white"
+          data-testid="btn-exit-meditation"
+        >
+          <X className="w-6 h-6" />
+        </button>
+
+        <div className="absolute top-6 left-6 right-16 z-20">
+          <div className="flex gap-1">
+            {selected.steps.map((_, i) => (
+              <div
+                key={i}
+                className={`h-0.5 flex-1 rounded-full transition-colors duration-1000 ${
+                  i <= stepIndex ? "bg-white/80" : "bg-white/20"
+                }`}
+              />
+            ))}
+          </div>
+        </div>
+
+        <div className="flex-1 flex flex-col items-center justify-center p-8 relative z-10">
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={stepIndex}
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              transition={{ duration: 1.2, ease: "easeInOut" }}
+              className="text-center"
+            >
+              <p className="text-white text-2xl font-serif leading-relaxed">{selected.steps[stepIndex].text}</p>
+            </motion.div>
+          </AnimatePresence>
+        </div>
+
+        <div className="relative z-10 text-center pb-12 px-6">
+          <p className="text-white/50 text-sm font-medium">{selected.title}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (selected && done) {
+    return (
+      <div className="flex flex-col min-h-[100dvh] relative overflow-hidden">
+        <div
+          className="absolute inset-0 bg-cover bg-center"
+          style={{ backgroundImage: `url(${selected.image})` }}
+        />
+        <div className="absolute inset-0 bg-black/60" />
+        <div className="flex-1 flex flex-col items-center justify-center p-8 relative z-10 text-center">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ duration: 1 }}
+          >
+            <div className="w-16 h-16 rounded-full bg-white/10 border border-white/30 flex items-center justify-center mx-auto mb-8">
+              <div className="w-8 h-8 rounded-full bg-white/30" />
+            </div>
+            <h2 className="text-3xl font-serif text-white mb-4">Well done.</h2>
+            <p className="text-white/70 text-lg mb-12">You gave yourself {selected.duration} of real rest.</p>
+            <button
+              onClick={exitMeditation}
+              className="px-8 py-3 bg-white/20 text-white rounded-full border border-white/30 font-medium hover:bg-white/30 transition-colors"
+            >
+              Return
+            </button>
+          </motion.div>
+        </div>
+      </div>
+    );
+  }
+
+  if (selected) {
+    return (
+      <div className="flex flex-col min-h-[100dvh] relative overflow-hidden">
+        <div
+          className="absolute inset-0 bg-cover bg-center"
+          style={{ backgroundImage: `url(${selected.image})` }}
+        />
+        <div className="absolute inset-0 bg-black/55" />
+
+        <button
+          onClick={exitMeditation}
+          className="absolute top-6 left-6 z-20 p-2 text-white/70 hover:text-white"
+        >
+          <ArrowLeft className="w-6 h-6" />
+        </button>
+
+        <div className="flex-1 flex flex-col justify-end p-8 relative z-10">
+          <motion.div
+            initial={{ opacity: 0, y: 30 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.7 }}
+          >
+            <span className="text-white/60 text-xs font-semibold uppercase tracking-widest mb-3 block">{selected.tag}</span>
+            <h1 className="text-4xl font-serif text-white mb-2">{selected.title}</h1>
+            <div className="flex items-center gap-2 text-white/60 mb-6">
+              <Clock className="w-4 h-4" />
+              <span className="text-sm">{selected.duration}</span>
+            </div>
+            <p className="text-white/80 text-lg leading-relaxed mb-10">{selected.intro}</p>
+            <button
+              onClick={beginPlaying}
+              className="w-full py-4 bg-white/20 border border-white/40 text-white rounded-2xl font-medium text-lg backdrop-blur-sm hover:bg-white/30 transition-colors flex items-center justify-center gap-3"
+              data-testid="btn-start-meditation"
+            >
+              <Play className="w-5 h-5" />
+              Begin
+            </button>
+          </motion.div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <PageTransition>
+      <div className="px-6 pt-14 pb-32 min-h-screen">
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="mb-8"
+        >
+          <h1 className="text-3xl font-serif tracking-tight mb-2">Guided Meditations</h1>
+          <p className="text-muted-foreground">Choose a session. Find your still point.</p>
+        </motion.div>
+
+        <div className="flex flex-col gap-4">
+          {MEDITATIONS.map((med, i) => (
+            <motion.button
+              key={med.id}
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: i * 0.08 }}
+              onClick={() => startMeditation(med)}
+              className="relative rounded-3xl overflow-hidden h-44 w-full text-left"
+              data-testid={`card-meditation-${med.id}`}
+            >
+              <img
+                src={med.image}
+                alt={med.title}
+                className="absolute inset-0 w-full h-full object-cover"
+              />
+              <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/30 to-transparent" />
+              <div className="absolute bottom-0 left-0 right-0 p-5">
+                <span className="text-white/60 text-xs font-semibold uppercase tracking-widest mb-1 block">{med.tag}</span>
+                <div className="flex items-end justify-between">
+                  <div>
+                    <h3 className="text-white text-xl font-serif">{med.title}</h3>
+                    <p className="text-white/70 text-sm">{med.subtitle}</p>
+                  </div>
+                  <div className="flex items-center gap-1 text-white/70">
+                    <Clock className="w-3.5 h-3.5" />
+                    <span className="text-xs">{med.duration}</span>
+                  </div>
+                </div>
+              </div>
+              <div className="absolute top-4 right-4 w-8 h-8 rounded-full bg-white/20 flex items-center justify-center">
+                <ChevronRight className="w-4 h-4 text-white" />
+              </div>
+            </motion.button>
+          ))}
+        </div>
+      </div>
+    </PageTransition>
+  );
+}
