@@ -1,3 +1,4 @@
+import CalmingRoom from "@/pages/CalmingRoom";
 import { Layout } from "@/components/Layout";
 import { Switch, Route, Router as WouterRouter } from "wouter";
 import { ThemeProvider } from "@/contexts/ThemeContext";
@@ -39,6 +40,7 @@ function AppRouter() {
         <Route path="/meditations" component={Meditations} />
         <Route path="/gratitude" component={Gratitude} />
         <Route path="/techniques" component={Techniques} />
+        <Route path="/calming-room" component={CalmingRoom} />
         <Route component={NotFound} />
       </Switch>
     </Layout>
