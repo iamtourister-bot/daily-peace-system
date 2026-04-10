@@ -26,7 +26,7 @@ const SOUNDS: Sound[] = [
     name: "Ocean Waves",
     description: "Slow waves rolling to shore",
     emoji: "🌊",
-    url: "https://assets.mixkit.co/active_storage/sfx/2184/2184-preview.mp3",
+    url: "https://assets.mixkit.co/active_storage/sfx/2520/2520-preview.mp3",
     color: "from-blue-900 to-cyan-700",
   },
   {
