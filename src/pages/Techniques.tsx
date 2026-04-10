@@ -3,6 +3,13 @@ import { motion, AnimatePresence } from "framer-motion";
 import { PageTransition } from "@/components/PageTransition";
 import { X, ChevronRight, Wind, Brain, Activity, Zap, Heart } from "lucide-react";
 
+interface Step {
+  instruction: string;
+  cue?: string;
+  duration?: number;
+  breathType?: "inhale" | "hold-full" | "exhale" | "hold-empty" | "none";
+}
+
 interface Technique {
   id: string;
   name: string;
@@ -11,7 +18,7 @@ interface Technique {
   science: string;
   icon: React.FC<{ className?: string }>;
   color: string;
-  steps: { instruction: string; cue?: string; duration?: number }[];
+  steps: Step[];
 }
 
 const TECHNIQUES: Technique[] = [
@@ -24,10 +31,10 @@ const TECHNIQUES: Technique[] = [
     icon: Wind,
     color: "bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300",
     steps: [
-      { instruction: "Breathe in slowly", cue: "Count to 4", duration: 4 },
-      { instruction: "Hold at the top", cue: "Count to 4", duration: 4 },
-      { instruction: "Breathe out fully", cue: "Count to 4", duration: 4 },
-      { instruction: "Hold at the bottom", cue: "Count to 4", duration: 4 },
+      { instruction: "Breathe in slowly", cue: "Count to 4", duration: 4, breathType: "inhale" },
+      { instruction: "Hold at the top", cue: "Count to 4", duration: 4, breathType: "hold-full" },
+      { instruction: "Breathe out fully", cue: "Count to 4", duration: 4, breathType: "exhale" },
+      { instruction: "Hold at the bottom", cue: "Count to 4", duration: 4, breathType: "hold-empty" },
     ]
   },
   {
@@ -39,9 +46,9 @@ const TECHNIQUES: Technique[] = [
     icon: Activity,
     color: "bg-green-50 dark:bg-green-950 text-green-700 dark:text-green-300",
     steps: [
-      { instruction: "Breathe in through your nose", cue: "Count to 4", duration: 4 },
-      { instruction: "Hold your breath completely", cue: "Count to 7", duration: 7 },
-      { instruction: "Exhale fully through your mouth", cue: "Count to 8", duration: 8 },
+      { instruction: "Breathe in through your nose", cue: "Count to 4", duration: 4, breathType: "inhale" },
+      { instruction: "Hold your breath completely", cue: "Count to 7", duration: 7, breathType: "hold-full" },
+      { instruction: "Exhale fully through your mouth", cue: "Count to 8", duration: 8, breathType: "exhale" },
     ]
   },
   {
@@ -53,9 +60,9 @@ const TECHNIQUES: Technique[] = [
     icon: Zap,
     color: "bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-300",
     steps: [
-      { instruction: "Take a full breath in through your nose", cue: "Fill your lungs", duration: 3 },
-      { instruction: "Without exhaling, sniff in a second short breath", cue: "Top up your lungs", duration: 2 },
-      { instruction: "Exhale very slowly through your mouth", cue: "As long as possible", duration: 8 },
+      { instruction: "Take a full breath in through your nose", cue: "Fill your lungs", duration: 3, breathType: "inhale" },
+      { instruction: "Without exhaling, sniff in a second short breath", cue: "Top up your lungs", duration: 2, breathType: "inhale" },
+      { instruction: "Exhale very slowly through your mouth", cue: "As long as possible", duration: 8, breathType: "exhale" },
     ]
   },
   {
@@ -67,12 +74,12 @@ const TECHNIQUES: Technique[] = [
     icon: Brain,
     color: "bg-purple-50 dark:bg-purple-950 text-purple-700 dark:text-purple-300",
     steps: [
-      { instruction: "Squeeze your feet tightly for 5 seconds, then release", cue: "Feel the contrast" },
-      { instruction: "Tighten your thighs and glutes for 5 seconds, then release", cue: "Let them sink heavy" },
-      { instruction: "Suck in your stomach, tighten your core, hold for 5 seconds, release", cue: "Soften completely" },
-      { instruction: "Shrug shoulders to ears, clench fists, hold 5 seconds, release", cue: "Drop everything" },
-      { instruction: "Scrunch your face as tight as possible, hold 5 seconds, release", cue: "Let it go smooth" },
-      { instruction: "Scan your entire body — it should feel noticeably heavier and lighter at once", cue: "This is release" },
+      { instruction: "Squeeze your feet tightly for 5 seconds, then release", cue: "Feel the contrast", breathType: "none" },
+      { instruction: "Tighten your thighs and glutes for 5 seconds, then release", cue: "Let them sink heavy", breathType: "none" },
+      { instruction: "Suck in your stomach, tighten your core, hold for 5 seconds, release", cue: "Soften completely", breathType: "none" },
+      { instruction: "Shrug shoulders to ears, clench fists, hold 5 seconds, release", cue: "Drop everything", breathType: "none" },
+      { instruction: "Scrunch your face as tight as possible, hold 5 seconds, release", cue: "Let it go smooth", breathType: "none" },
+      { instruction: "Scan your entire body — notice how much heavier and lighter you feel", cue: "This is release", breathType: "none" },
     ]
   },
   {
@@ -84,13 +91,71 @@ const TECHNIQUES: Technique[] = [
     icon: Heart,
     color: "bg-rose-50 dark:bg-rose-950 text-rose-700 dark:text-rose-300",
     steps: [
-      { instruction: "Recognize — Name what you're feeling right now", cue: '"I notice I am feeling anxious / sad / overwhelmed..."' },
-      { instruction: "Allow — Don't push it away. Let it be there.", cue: '"This feeling is allowed to exist for now."' },
-      { instruction: "Investigate — Where do you feel it in your body? What does it need?", cue: "Approach with genuine curiosity, not judgment" },
-      { instruction: "Nurture — Offer yourself the kindness you'd offer a friend", cue: '"This is hard. I am doing my best. I am enough."' },
+      { instruction: "Recognize — Name what you're feeling right now", cue: '"I notice I am feeling anxious / sad / overwhelmed..."', breathType: "none" },
+      { instruction: "Allow — Don't push it away. Let it be there.", cue: '"This feeling is allowed to exist for now."', breathType: "none" },
+      { instruction: "Investigate — Where do you feel it in your body? What does it need?", cue: "Approach with genuine curiosity, not judgment", breathType: "none" },
+      { instruction: "Nurture — Offer yourself the kindness you'd offer a friend", cue: '"This is hard. I am doing my best. I am enough."', breathType: "none" },
     ]
   },
 ];
+
+function BreathCircle({ breathType, counting, duration }: {
+  breathType: Step["breathType"];
+  counting: number;
+  duration: number;
+}) {
+  const isInhale = breathType === "inhale";
+  const isExhale = breathType === "exhale";
+  const isHoldFull = breathType === "hold-full";
+  const isHoldEmpty = breathType === "hold-empty";
+
+  const scale = isInhale ? 1.4 : isHoldFull ? 1.4 : isExhale ? 0.8 : 0.8;
+
+  const label = isInhale
+    ? "Breathe in..."
+    : isExhale
+    ? "Breathe out..."
+    : isHoldFull
+    ? "Hold..."
+    : "Hold empty...";
+
+  return (
+    <div className="flex flex-col items-center mb-8">
+      <div className="relative w-36 h-36 flex items-center justify-center">
+        {/* Outer pulse ring */}
+        <motion.div
+          animate={{ scale: scale, opacity: isHoldFull || isHoldEmpty ? 0.3 : 0.15 }}
+          transition={{ duration: duration, ease: isInhale ? "easeIn" : isExhale ? "easeOut" : "linear" }}
+          className="absolute w-36 h-36 rounded-full bg-primary"
+        />
+        {/* Main circle */}
+        <motion.div
+          animate={{ scale: scale }}
+          transition={{ duration: duration, ease: isInhale ? "easeIn" : isExhale ? "easeOut" : "linear" }}
+          className="absolute w-24 h-24 rounded-full bg-primary/30 border-2 border-primary/50"
+        />
+        {/* Number in center */}
+        <motion.span
+          key={counting}
+          initial={{ scale: 1.3, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          className="relative z-10 text-4xl font-mono font-bold text-primary"
+        >
+          {counting}
+        </motion.span>
+      </div>
+      {/* Breath label */}
+      <motion.p
+        key={label}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        className="text-sm text-primary font-medium mt-3 tracking-wide"
+      >
+        {label}
+      </motion.p>
+    </div>
+  );
+}
 
 interface TechniquePlayerProps {
   technique: Technique;
@@ -128,6 +193,7 @@ function TechniquePlayer({ technique, onClose }: TechniquePlayerProps) {
   };
 
   const currentStep = technique.steps[activeStep];
+  const hasBreathAnimation = currentStep.breathType && currentStep.breathType !== "none";
 
   if (done) {
     return (
@@ -145,7 +211,9 @@ function TechniquePlayer({ technique, onClose }: TechniquePlayerProps) {
               <technique.icon className="w-8 h-8" />
             </div>
             <h2 className="text-3xl font-serif mb-4">Complete.</h2>
-            <p className="text-muted-foreground text-lg mb-10">Your nervous system just received a real signal to relax.</p>
+            <p className="text-muted-foreground text-lg mb-10">
+              Your nervous system just received a real signal to relax.
+            </p>
             <button
               onClick={onClose}
               className="px-8 py-3 bg-primary text-primary-foreground rounded-full font-medium"
@@ -164,9 +232,12 @@ function TechniquePlayer({ technique, onClose }: TechniquePlayerProps) {
         <button onClick={onClose} className="p-2 -ml-2 text-muted-foreground">
           <X className="w-6 h-6" />
         </button>
-        <span className="text-muted-foreground text-sm font-medium">{activeStep + 1} / {technique.steps.length}</span>
+        <span className="text-muted-foreground text-sm font-medium">
+          {activeStep + 1} / {technique.steps.length}
+        </span>
       </div>
 
+      {/* Progress bar */}
       <div className="w-full flex gap-1.5 mb-12">
         {technique.steps.map((_, i) => (
           <div
@@ -188,26 +259,37 @@ function TechniquePlayer({ technique, onClose }: TechniquePlayerProps) {
             transition={{ duration: 0.5 }}
             className="text-center max-w-sm w-full"
           >
-            {currentStep.duration && timer !== null ? (
-              <div className="w-24 h-24 rounded-full border-4 border-primary/30 flex items-center justify-center mx-auto mb-8">
-                <motion.span
-                  key={counting}
-                  initial={{ scale: 1.3, opacity: 0 }}
-                  animate={{ scale: 1, opacity: 1 }}
-                  className="text-4xl font-mono font-bold text-primary"
-                >
-                  {counting}
-                </motion.span>
-              </div>
+            {/* Breathing circle or icon */}
+            {hasBreathAnimation && timer !== null ? (
+              <BreathCircle
+                breathType={currentStep.breathType}
+                counting={counting}
+                duration={currentStep.duration!}
+              />
             ) : (
               <div className="w-24 h-24 rounded-full bg-primary/10 flex items-center justify-center mx-auto mb-8">
-                <technique.icon className="w-12 h-12 text-primary" />
+                {currentStep.duration && timer !== null ? (
+                  <motion.span
+                    key={counting}
+                    initial={{ scale: 1.3, opacity: 0 }}
+                    animate={{ scale: 1, opacity: 1 }}
+                    className="text-4xl font-mono font-bold text-primary"
+                  >
+                    {counting}
+                  </motion.span>
+                ) : (
+                  <technique.icon className="w-12 h-12 text-primary" />
+                )}
               </div>
             )}
 
-            <h3 className="text-2xl font-serif text-foreground mb-3 leading-snug">{currentStep.instruction}</h3>
+            <h3 className="text-2xl font-serif text-foreground mb-3 leading-snug">
+              {currentStep.instruction}
+            </h3>
             {currentStep.cue && (
-              <p className="text-muted-foreground text-base italic mb-10">{currentStep.cue}</p>
+              <p className="text-muted-foreground text-base italic mb-10">
+                {currentStep.cue}
+              </p>
             )}
 
             <div className="flex gap-3 justify-center mt-6">
@@ -215,7 +297,6 @@ function TechniquePlayer({ technique, onClose }: TechniquePlayerProps) {
                 <button
                   onClick={() => startCounting(currentStep.duration!)}
                   className="px-6 py-3 bg-secondary text-foreground rounded-full font-medium text-sm hover:bg-secondary/80 transition-colors"
-                  data-testid={`btn-start-timer-${activeStep}`}
                 >
                   Start Timer
                 </button>
@@ -223,7 +304,6 @@ function TechniquePlayer({ technique, onClose }: TechniquePlayerProps) {
               <button
                 onClick={handleNext}
                 className="px-8 py-3 bg-primary text-primary-foreground rounded-full font-medium"
-                data-testid={`btn-next-step-${activeStep}`}
               >
                 {activeStep < technique.steps.length - 1 ? "Next" : "Finish"}
               </button>
@@ -263,7 +343,6 @@ export default function Techniques() {
               transition={{ delay: i * 0.07 }}
               onClick={() => setActiveTechnique(tech)}
               className="bg-card border border-border rounded-3xl p-5 text-left w-full hover:shadow-sm transition-shadow"
-              data-testid={`card-technique-${tech.id}`}
             >
               <div className="flex items-start justify-between mb-3">
                 <div className={`w-10 h-10 rounded-2xl ${tech.color} flex items-center justify-center`}>
@@ -271,7 +350,9 @@ export default function Techniques() {
                 </div>
                 <ChevronRight className="w-5 h-5 text-muted-foreground mt-1" />
               </div>
-              <span className="text-xs font-semibold uppercase tracking-widest text-primary mb-1 block">{tech.tag}</span>
+              <span className="text-xs font-semibold uppercase tracking-widest text-primary mb-1 block">
+                {tech.tag}
+              </span>
               <h3 className="text-lg font-semibold text-foreground mb-1">{tech.name}</h3>
               <p className="text-muted-foreground text-sm leading-relaxed">{tech.tagline}</p>
             </motion.button>
