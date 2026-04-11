@@ -1,10 +1,11 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Link } from "wouter";
 import { motion, AnimatePresence } from "framer-motion";
 import { PageTransition } from "@/components/PageTransition";
-import { Mic, Check } from "lucide-react";
+import { Mic, Check, Heart } from "lucide-react";
 
 type Mood = "overwhelmed" | "anxious" | "angry" | "sad" | "vent";
+type Mode = "release" | "heard" | null;
 
 const moodOptions: { label: string; value: Mood }[] = [
   { label: "Overwhelmed", value: "overwhelmed" },
@@ -70,41 +71,134 @@ const followUps: Record<Mood, string[]> = {
   ],
 };
 
+// Keyword-based personal responses
+function getPersonalResponse(transcript: string, mood: Mood): string {
+  const text = transcript.toLowerCase();
+
+  if (text.includes("work") || text.includes("job") || text.includes("boss"))
+    return "Work pressure is real and exhausting. You're carrying a lot — and you still showed up for yourself today.";
+  if (text.includes("family") || text.includes("mom") || text.includes("dad") || text.includes("parents"))
+    return "Family relationships can be the heaviest weight. It's okay to feel what you feel about the people closest to you.";
+  if (text.includes("relationship") || text.includes("partner") || text.includes("boyfriend") || text.includes("girlfriend"))
+    return "Relationships touch the deepest parts of us. Whatever you're feeling right now — it's valid and it matters.";
+  if (text.includes("money") || text.includes("financial") || text.includes("broke") || text.includes("debt"))
+    return "Financial stress is one of the hardest things to carry. You're not alone in this — and you're doing better than you think.";
+  if (text.includes("lonely") || text.includes("alone") || text.includes("nobody"))
+    return "Loneliness is one of the hardest feelings. But right now, in this moment, you're not alone. We're here with you.";
+  if (text.includes("tired") || text.includes("exhausted") || text.includes("sleep"))
+    return "Being tired goes beyond just sleep sometimes. Your mind and body are asking for rest — and that's okay.";
+  if (text.includes("scared") || text.includes("fear") || text.includes("afraid"))
+    return "Fear is your mind trying to protect you. You were brave enough to speak it out loud — that takes real courage.";
+  if (text.includes("angry") || text.includes("mad") || text.includes("frustrated"))
+    return "That anger makes sense. You don't have to justify it. Letting it out is already a healthy step.";
+  if (text.includes("sad") || text.includes("cry") || text.includes("crying"))
+    return "Tears are not weakness — they're honesty. Whatever brought you here today, you're allowed to feel it fully.";
+  if (text.includes("happy") || text.includes("good") || text.includes("better"))
+    return "It's beautiful that you're feeling some light today. Hold onto that — you deserve every bit of it.";
+
+  // Default based on mood
+  const mood_responses = responses[mood];
+  return mood_responses[Math.floor(Math.random() * mood_responses.length)];
+}
+
 function getRandomItem<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
 export default function Speak() {
-  const [phase, setPhase] = useState<"mood" | "start" | "listening" | "silent" | "response">("mood");
+  const [phase, setPhase] = useState<"choose" | "mood" | "start" | "listening" | "silent" | "response">("choose");
   const [selectedMood, setSelectedMood] = useState<Mood | null>(null);
+  const [selectedMode, setSelectedMode] = useState<Mode>(null);
   const [response, setResponse] = useState("");
   const [questions, setQuestions] = useState<string[]>([]);
+  const [transcript, setTranscript] = useState("");
+  const [isListening, setIsListening] = useState(false);
+  const [volume, setVolume] = useState(0);
+  const recognitionRef = useRef<any>(null);
+  const animFrameRef = useRef<number | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
 
+  // Volume animation
   useEffect(() => {
-    if (phase === "listening") {
-      const timer = setTimeout(() => {
-        setPhase("silent");
-      }, 5000);
-      return () => clearTimeout(timer);
+    if (isListening) {
+      navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+        const ctx = new AudioContext();
+        const source = ctx.createMediaStreamSource(stream);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 256;
+        source.connect(analyser);
+        analyserRef.current = analyser;
+
+        const tick = () => {
+          const data = new Uint8Array(analyser.frequencyBinCount);
+          analyser.getByteFrequencyData(data);
+          const avg = data.reduce((a, b) => a + b, 0) / data.length;
+          setVolume(avg);
+          animFrameRef.current = requestAnimationFrame(tick);
+        };
+        tick();
+      }).catch(() => setVolume(0));
+    } else {
+      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+      setVolume(0);
     }
-  }, [phase]);
+  }, [isListening]);
+
+  const startListening = () => {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+    if (selectedMode === "heard" && SpeechRecognition) {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = "en-US";
+
+      recognition.onresult = (event: any) => {
+        let full = "";
+        for (let i = 0; i < event.results.length; i++) {
+          full += event.results[i][0].transcript + " ";
+        }
+        setTranscript(full.trim());
+      };
+
+      recognition.start();
+      recognitionRef.current = recognition;
+    }
+
+    setIsListening(true);
+    setPhase("listening");
+  };
+
+  const stopListening = () => {
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+    }
+    setIsListening(false);
+    setPhase("silent");
+  };
 
   useEffect(() => {
     if (phase === "silent") {
       const timer = setTimeout(() => {
         const mood = selectedMood || "vent";
-        setResponse(getRandomItem(responses[mood]));
+        if (selectedMode === "heard" && transcript) {
+          setResponse(getPersonalResponse(transcript, mood));
+        } else {
+          setResponse(getRandomItem(responses[mood]));
+        }
         setQuestions(followUps[mood]);
         setPhase("response");
       }, 2500);
       return () => clearTimeout(timer);
     }
-  }, [phase, selectedMood]);
+  }, [phase, selectedMood, selectedMode, transcript]);
 
   const handleMoodSelect = (mood: Mood) => {
     setSelectedMood(mood);
     setPhase("start");
   };
+
+  const micScale = 1 + (volume / 255) * 0.5;
 
   return (
     <PageTransition>
@@ -114,6 +208,48 @@ export default function Speak() {
 
         <div className="flex-1 flex flex-col items-center justify-center">
           <AnimatePresence mode="wait">
+
+            {/* Step 0 — Choose Mode */}
+            {phase === "choose" && (
+              <motion.div
+                key="choose"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+                className="w-full flex flex-col items-center text-center"
+              >
+                <p className="text-xl font-medium text-foreground mb-2">How would you like to be heard today?</p>
+                <p className="text-muted-foreground mb-10">Choose what feels right for you.</p>
+
+                <div className="w-full flex flex-col gap-4">
+                  <button
+                    onClick={() => { setSelectedMode("release"); setPhase("mood"); }}
+                    className="w-full p-6 rounded-3xl border border-border bg-card text-left hover:border-primary transition-colors"
+                  >
+                    <div className="flex items-center gap-4 mb-2">
+                      <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center">
+                        <Mic className="w-5 h-5 text-primary" />
+                      </div>
+                      <p className="font-semibold text-foreground">Speak & Release</p>
+                    </div>
+                    <p className="text-muted-foreground text-sm">Just let it out. No analysis. No pressure. Pure release.</p>
+                  </button>
+
+                  <button
+                    onClick={() => { setSelectedMode("heard"); setPhase("mood"); }}
+                    className="w-full p-6 rounded-3xl border border-border bg-card text-left hover:border-primary transition-colors"
+                  >
+                    <div className="flex items-center gap-4 mb-2">
+                      <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center">
+                        <Heart className="w-5 h-5 text-primary" />
+                      </div>
+                      <p className="font-semibold text-foreground">Speak & Be Heard</p>
+                    </div>
+                    <p className="text-muted-foreground text-sm">Talk and get a personal response based on what you share.</p>
+                  </button>
+                </div>
+              </motion.div>
+            )}
 
             {/* Step 1 — Mood Selection */}
             {phase === "mood" && (
@@ -156,13 +292,17 @@ export default function Speak() {
                 className="flex flex-col items-center text-center"
               >
                 <button
-                  onClick={() => setPhase("listening")}
+                  onClick={startListening}
                   className="w-32 h-32 rounded-full bg-primary flex items-center justify-center text-primary-foreground shadow-lg hover:bg-primary/90 transition-colors mb-8"
                 >
                   <Mic className="w-10 h-10" />
                 </button>
                 <p className="text-xl text-foreground font-medium">Tap to speak</p>
-                <p className="text-muted-foreground mt-2">Say whatever is on your mind. We're listening.</p>
+                <p className="text-muted-foreground mt-2">
+                  {selectedMode === "heard"
+                    ? "We'll listen and respond personally to what you share."
+                    : "Say whatever is on your mind. We're listening."}
+                </p>
               </motion.div>
             )}
 
@@ -175,15 +315,41 @@ export default function Speak() {
                 exit={{ opacity: 0 }}
                 className="flex flex-col items-center text-center"
               >
-                <motion.div
-                  animate={{ scale: [1, 1.2, 1] }}
-                  transition={{ repeat: Infinity, duration: 2 }}
-                  className="w-32 h-32 rounded-full bg-primary/20 flex items-center justify-center text-primary mb-8 border border-primary/30"
-                >
-                  <Mic className="w-10 h-10" />
-                </motion.div>
+                {/* Mic reacts to voice volume */}
+                <div className="relative flex items-center justify-center mb-8">
+                  <motion.div
+                    animate={{ scale: micScale }}
+                    transition={{ duration: 0.1 }}
+                    className="w-32 h-32 rounded-full bg-primary/20 flex items-center justify-center text-primary border border-primary/30"
+                  >
+                    <Mic className="w-10 h-10" />
+                  </motion.div>
+                  {/* Outer pulse rings reacting to volume */}
+                  <motion.div
+                    animate={{ scale: micScale * 1.3, opacity: volume > 10 ? 0.3 : 0 }}
+                    transition={{ duration: 0.1 }}
+                    className="absolute w-32 h-32 rounded-full bg-primary/10"
+                  />
+                  <motion.div
+                    animate={{ scale: micScale * 1.6, opacity: volume > 20 ? 0.15 : 0 }}
+                    transition={{ duration: 0.1 }}
+                    className="absolute w-32 h-32 rounded-full bg-primary/10"
+                  />
+                </div>
+
                 <p className="text-xl text-foreground font-medium">Listening...</p>
                 <p className="text-muted-foreground mt-2">Take your time. Speak until you're empty.</p>
+
+                {/* Done button — user controls when to finish */}
+                <motion.button
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 3 }}
+                  onClick={stopListening}
+                  className="mt-12 px-8 py-3 bg-primary text-primary-foreground rounded-full font-medium"
+                >
+                  Done Speaking
+                </motion.button>
               </motion.div>
             )}
 
