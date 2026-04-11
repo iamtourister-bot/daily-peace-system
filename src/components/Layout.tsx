@@ -149,6 +149,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
                   { href: "/speak", icon: Mic, label: "Speak & Release", sub: "Voice journal" },
                   { href: "/audio-calm", icon: VolumeX, label: "Sound Bath", sub: "5 ambient sounds" },
                   { href: "/calming-room", icon: Wind, label: "Calming Room", sub: "Sounds for peace" },
+                  { href: "/sleep-stories", icon: Moon, label: "Sleep Stories", sub: "Drift into sleep" },
                   { href: "/night", icon: Moon, label: "Night System", sub: "Wind down" },
                   { href: "/learn", icon: BookOpen, label: "Learn", sub: "How it works" },
                   { href: "/about", icon: Info, label: "About Reset", sub: "Our mission" },
