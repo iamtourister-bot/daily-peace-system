@@ -118,31 +118,43 @@ export default function Speak() {
   const animFrameRef = useRef<number | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
 
-  // Volume animation
-  useEffect(() => {
-    if (isListening) {
-      navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
-        const ctx = new AudioContext();
-        const source = ctx.createMediaStreamSource(stream);
-        const analyser = ctx.createAnalyser();
-        analyser.fftSize = 256;
-        source.connect(analyser);
-        analyserRef.current = analyser;
+ // Volume animation
+useEffect(() => {
+    if (isListening && selectedMode === "heard") {
+      try {
+        navigator.mediaDevices?.getUserMedia({ audio: true }).then(stream => {
+          try {
+            const ctx = new AudioContext();
+            const source = ctx.createMediaStreamSource(stream);
+            const analyser = ctx.createAnalyser();
+            analyser.fftSize = 256;
+            source.connect(analyser);
+            analyserRef.current = analyser;
 
-        const tick = () => {
-          const data = new Uint8Array(analyser.frequencyBinCount);
-          analyser.getByteFrequencyData(data);
-          const avg = data.reduce((a, b) => a + b, 0) / data.length;
-          setVolume(avg);
-          animFrameRef.current = requestAnimationFrame(tick);
-        };
-        tick();
-      }).catch(() => setVolume(0));
+            const tick = () => {
+              try {
+                const data = new Uint8Array(analyser.frequencyBinCount);
+                analyser.getByteFrequencyData(data);
+                const avg = data.reduce((a, b) => a + b, 0) / data.length;
+                setVolume(avg);
+                animFrameRef.current = requestAnimationFrame(tick);
+              } catch {
+                setVolume(0);
+              }
+            };
+            tick();
+          } catch {
+            setVolume(0);
+          }
+        }).catch(() => setVolume(0));
+      } catch {
+        setVolume(0);
+      }
     } else {
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
       setVolume(0);
     }
-  }, [isListening]);
+  }, [isListening, selectedMode]);
 
   const startListening = () => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
