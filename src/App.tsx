@@ -1,3 +1,4 @@
+import SleepStories from "@/pages/SleepStories";
 import CalmingRoom from "@/pages/CalmingRoom";
 import { Layout } from "@/components/Layout";
 import { Switch, Route, Router as WouterRouter } from "wouter";
@@ -41,6 +42,7 @@ function AppRouter() {
         <Route path="/gratitude" component={Gratitude} />
         <Route path="/techniques" component={Techniques} />
         <Route path="/calming-room" component={CalmingRoom} />
+        <Route path="/sleep-stories" component={SleepStories} />
         <Route component={NotFound} />
       </Switch>
     </Layout>
