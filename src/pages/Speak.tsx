@@ -209,47 +209,56 @@ export default function Speak() {
         <div className="flex-1 flex flex-col items-center justify-center">
           <AnimatePresence mode="wait">
 
-            {/* Step 0 — Choose Mode */}
-            {phase === "choose" && (
-              <motion.div
-                key="choose"
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -20 }}
-                className="w-full flex flex-col items-center text-center"
-              >
-                <p className="text-xl font-medium text-foreground mb-2">How would you like to be heard today?</p>
-                <p className="text-muted-foreground mb-10">Choose what feels right for you.</p>
+           {/* Step 0 — Choose Mode */}
+{phase === "choose" && (
+  <motion.div
+    key="choose"
+    initial={{ opacity: 0, y: 20 }}
+    animate={{ opacity: 1, y: 0 }}
+    exit={{ opacity: 0, y: -20 }}
+    className="w-full flex flex-col items-center text-center"
+  >
+    <p className="text-xl font-medium text-foreground mb-10">
+      How would you like to be heard?
+    </p>
 
-                <div className="w-full flex flex-col gap-4">
-                  <button
-                    onClick={() => { setSelectedMode("release"); setPhase("mood"); }}
-                    className="w-full p-6 rounded-3xl border border-border bg-card text-left hover:border-primary transition-colors"
-                  >
-                    <div className="flex items-center gap-4 mb-2">
-                      <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center">
-                        <Mic className="w-5 h-5 text-primary" />
-                      </div>
-                      <p className="font-semibold text-foreground">Speak & Release</p>
-                    </div>
-                    <p className="text-muted-foreground text-sm">Just let it out. No analysis. No pressure. Pure release.</p>
-                  </button>
+    <div className="w-full flex flex-col gap-4">
+      <button
+        onClick={() => { setSelectedMode("release"); setPhase("mood"); }}
+        className="w-full p-5 rounded-3xl border border-border bg-card text-left hover:border-primary transition-colors"
+      >
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center">
+            <Mic className="w-5 h-5 text-primary" />
+          </div>
+          <div>
+            <p className="font-semibold text-foreground">Speak & Release</p>
+            <p className="text-muted-foreground text-xs">Just let it out</p>
+          </div>
+        </div>
+      </button>
 
-                  <button
-                    onClick={() => { setSelectedMode("heard"); setPhase("mood"); }}
-                    className="w-full p-6 rounded-3xl border border-border bg-card text-left hover:border-primary transition-colors"
-                  >
-                    <div className="flex items-center gap-4 mb-2">
-                      <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center">
-                        <Heart className="w-5 h-5 text-primary" />
-                      </div>
-                      <p className="font-semibold text-foreground">Speak & Be Heard</p>
-                    </div>
-                    <p className="text-muted-foreground text-sm">Talk and get a personal response based on what you share.</p>
-                  </button>
-                </div>
-              </motion.div>
-            )}
+      <button
+        onClick={() => { setSelectedMode("heard"); setPhase("mood"); }}
+        className="w-full p-5 rounded-3xl border border-border bg-card text-left hover:border-primary transition-colors"
+      >
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center">
+            <Heart className="w-5 h-5 text-primary" />
+          </div>
+          <div>
+            <p className="font-semibold text-foreground">Speak & Be Heard</p>
+            <p className="text-muted-foreground text-xs">Get a personal response</p>
+          </div>
+        </div>
+      </button>
+    </div>
+
+    <p className="text-xs text-muted-foreground mt-6 px-4">
+      💡 Speak & Be Heard uses your mic to personalise your response.
+    </p>
+  </motion.div>
+)}
 
             {/* Step 1 — Mood Selection */}
             {phase === "mood" && (
