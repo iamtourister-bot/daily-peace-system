@@ -5,14 +5,22 @@ import { PageTransition } from "@/components/PageTransition";
 import { Check, X, Heart } from "lucide-react";
 import { useSession } from "@/contexts/SessionContext";
 
-const NATURE_BG = "https://images.unsplash.com/photo-1523712999610-f77fbcfc3843?w=800&auto=format&fit=crop&q=80";
+const BREATHING_BG = "https://images.unsplash.com/photo-1523712999610-f77fbcfc3843?w=800&auto=format&fit=crop&q=80";
+const GROUNDING_BG = "https://images.unsplash.com/photo-1441974231531-c6227db76b6e?w=800&auto=format&fit=crop&q=80";
+
+const GROUNDING_PROMPTS = [
+  "Something close to you",
+  "Something with color",
+  "Something that moves",
+  "Something still and quiet",
+  "Something you usually ignore",
+];
 
 export default function QuickReset() {
   const [phase, setPhase] = useState<1 | 2 | 3>(1);
   const [breathState, setBreathState] = useState<"in" | "out">("in");
   const [, setLocation] = useLocation();
   const { emotionalState } = useSession();
-
   const [items, setItems] = useState([false, false, false, false, false]);
 
   useEffect(() => {
@@ -20,11 +28,9 @@ export default function QuickReset() {
       const interval = setInterval(() => {
         setBreathState(prev => prev === "in" ? "out" : "in");
       }, 4000);
-
       const phaseTimer = setTimeout(() => {
         setPhase(2);
       }, 16000);
-
       return () => {
         clearInterval(interval);
         clearTimeout(phaseTimer);
@@ -60,33 +66,31 @@ export default function QuickReset() {
   return (
     <PageTransition>
       <div className="flex flex-col min-h-[100dvh] relative overflow-hidden">
-        {phase === 1 && (
-          <>
-            <div
-              className="absolute inset-0 bg-cover bg-center"
-              style={{ backgroundImage: `url(${NATURE_BG})` }}
-            />
-            <div className="absolute inset-0 bg-black/50" />
-          </>
-        )}
 
-        <div className={`flex flex-col min-h-[100dvh] px-6 py-12 relative z-10 ${phase !== 1 ? "bg-background" : ""}`}>
+        {/* Background */}
+        <div
+          className="absolute inset-0 bg-cover bg-center transition-all duration-1000"
+          style={{
+            backgroundImage: `url(${phase === 2 ? GROUNDING_BG : BREATHING_BG})`,
+          }}
+        />
+        <div className="absolute inset-0 bg-black/50" />
+
+        <div className="flex flex-col min-h-[100dvh] px-6 py-12 relative z-10">
           <button
             onClick={() => setLocation("/")}
-            className={`absolute top-6 right-6 p-2 z-10 ${phase === 1 ? "text-white/70 hover:text-white" : "text-muted-foreground"}`}
-            data-testid="btn-close-quick-reset"
+            className="absolute top-6 right-6 p-2 z-10 text-white/70 hover:text-white"
           >
             <X className="w-6 h-6" />
           </button>
 
+          {/* Progress bar */}
           <div className="w-full flex gap-2 mb-16 pt-8">
             {[1, 2, 3].map((p) => (
               <div
                 key={p}
                 className={`h-1 flex-1 rounded-full transition-colors duration-500 ${
-                  p <= phase
-                    ? (phase === 1 ? "bg-white/70" : "bg-primary")
-                    : (phase === 1 ? "bg-white/20" : "bg-secondary")
+                  p <= phase ? "bg-white/70" : "bg-white/20"
                 }`}
               />
             ))}
@@ -94,6 +98,8 @@ export default function QuickReset() {
 
           <div className="flex-1 flex flex-col items-center justify-center">
             <AnimatePresence mode="wait">
+
+              {/* Phase 1 — Breathing */}
               {phase === 1 && (
                 <motion.div
                   key="phase1"
@@ -117,6 +123,7 @@ export default function QuickReset() {
                 </motion.div>
               )}
 
+              {/* Phase 2 — Grounding */}
               {phase === 2 && (
                 <motion.div
                   key="phase2"
@@ -125,28 +132,29 @@ export default function QuickReset() {
                   exit={{ opacity: 0, y: -20 }}
                   className="w-full max-w-sm"
                 >
-                  <h2 className="text-2xl font-serif mb-2 text-foreground">Grounding</h2>
-                  <p className="text-muted-foreground mb-8 text-lg">Name 5 things you can see right now.</p>
+                  <h2 className="text-2xl font-serif mb-2 text-white">Grounding</h2>
+                  <p className="text-white/70 mb-8 text-base">
+                    Look around. Tap each thing as you find it.
+                  </p>
 
                   <div className="flex flex-col gap-3">
                     {items.map((checked, i) => (
                       <button
                         key={i}
                         onClick={() => toggleItem(i)}
-                        data-testid={`btn-grounding-item-${i}`}
-                        className={`flex items-center gap-4 p-4 rounded-2xl border transition-all ${
+                        className={`flex items-center gap-4 p-4 rounded-2xl border transition-all backdrop-blur-sm ${
                           checked
-                            ? "bg-primary/10 border-primary/30 text-primary"
-                            : "bg-card border-border text-muted-foreground hover:bg-secondary"
+                            ? "bg-white/20 border-white/40 text-white"
+                            : "bg-black/30 border-white/20 text-white/70 hover:bg-black/40"
                         }`}
                       >
                         <div className={`w-6 h-6 rounded-full border flex items-center justify-center transition-colors ${
-                          checked ? "bg-primary border-primary text-primary-foreground" : "border-muted-foreground"
+                          checked ? "bg-white border-white" : "border-white/40"
                         }`}>
-                          {checked && <Check className="w-4 h-4" />}
+                          {checked && <Check className="w-4 h-4 text-black" />}
                         </div>
                         <span className="font-medium text-left flex-1">
-                          {checked ? `Thing ${i + 1} — seen` : `Thing ${i + 1}`}
+                          {checked ? `Found it` : `I can see — ${GROUNDING_PROMPTS[i]}`}
                         </span>
                       </button>
                     ))}
@@ -154,6 +162,7 @@ export default function QuickReset() {
                 </motion.div>
               )}
 
+              {/* Phase 3 — Reassurance */}
               {phase === 3 && (
                 <motion.div
                   key="phase3"
@@ -162,24 +171,24 @@ export default function QuickReset() {
                   exit={{ opacity: 0 }}
                   className="text-center px-4"
                 >
-                  <div className="w-16 h-16 rounded-full bg-primary/10 text-primary flex items-center justify-center mx-auto mb-8">
+                  <div className="w-16 h-16 rounded-full bg-white/20 text-white flex items-center justify-center mx-auto mb-8">
                     <Heart className="w-8 h-8" />
                   </div>
-                  <h2 className="text-3xl font-serif mb-6 leading-tight text-foreground">
+                  <h2 className="text-3xl font-serif mb-6 leading-tight text-white">
                     You are safe.<br />This moment will pass.
                   </h2>
-                  <p className="text-muted-foreground text-lg leading-relaxed">
+                  <p className="text-white/80 text-lg leading-relaxed">
                     {getReassurance()}
                   </p>
                   <button
                     onClick={() => setLocation("/insight")}
-                    className="mt-12 px-8 py-3 bg-primary text-primary-foreground rounded-full font-medium"
-                    data-testid="btn-to-insight"
+                    className="mt-12 px-8 py-3 bg-white/20 backdrop-blur-sm text-white border border-white/30 rounded-full font-medium hover:bg-white/30 transition-colors"
                   >
                     Continue
                   </button>
                 </motion.div>
               )}
+
             </AnimatePresence>
           </div>
         </div>
