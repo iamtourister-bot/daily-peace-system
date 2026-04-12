@@ -54,12 +54,13 @@ function App() {
   return (
     <ThemeProvider>
       <SessionProvider>
-        <WouterRouter base={import.meta.env.BASE_URL?.replace(/\/$/, "") || ""}>
-          <AppRouter />
-        </WouterRouter>
+        <AccessGate>
+          <WouterRouter base={import.meta.env.BASE_URL?.replace(/\/$/, "") || ""}>
+            <AppRouter />
+          </WouterRouter>
+        </AccessGate>
       </SessionProvider>
     </ThemeProvider>
   );
 }
-
 export default App;
