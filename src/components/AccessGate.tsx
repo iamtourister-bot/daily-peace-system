@@ -87,11 +87,9 @@ export function AccessGate({ children }: { children: React.ReactNode }) {
           </div>
 
           <p className="text-xs text-muted-foreground">
-            Don't have a code?{" "}
+            No code yet?{" "}
             
-              href="https://gumroad.com"
-              target="_blank"
-              rel="noopener noreferrer"
+              href="#"
               className="text-primary underline underline-offset-4"
             >
               Get access here
