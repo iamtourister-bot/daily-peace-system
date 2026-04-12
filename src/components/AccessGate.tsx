@@ -1,20 +1,23 @@
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import { Onboarding } from "@/components/Onboarding";
 
 const SECRET_CODE = "RESET2026";
 const STORAGE_KEY = "reset_access_granted";
+const ONBOARDING_KEY = "reset_onboarding_done";
 
 export function AccessGate({ children }: { children: React.ReactNode }) {
   const [granted, setGranted] = useState(false);
+  const [onboardingDone, setOnboardingDone] = useState(false);
   const [code, setCode] = useState("");
   const [error, setError] = useState(false);
   const [checking, setChecking] = useState(true);
 
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved === "true") {
-      setGranted(true);
-    }
+    const onboarded = localStorage.getItem(ONBOARDING_KEY);
+    if (saved === "true") setGranted(true);
+    if (onboarded === "true") setOnboardingDone(true);
     setChecking(false);
   }, []);
 
@@ -30,7 +33,19 @@ export function AccessGate({ children }: { children: React.ReactNode }) {
   };
 
   if (checking) return null;
-  if (granted) return <>{children}</>;
+
+  if (granted && !onboardingDone) {
+    return (
+      <Onboarding
+        onDone={() => {
+          localStorage.setItem(ONBOARDING_KEY, "true");
+          setOnboardingDone(true);
+        }}
+      />
+    );
+  }
+
+  if (granted && onboardingDone) return <>{children}</>;
 
   return (
     <div className="flex flex-col min-h-[100dvh] bg-background items-center justify-center px-6">
