@@ -30,7 +30,6 @@ export function AccessGate({ children }: { children: React.ReactNode }) {
   };
 
   if (checking) return null;
-
   if (granted) return <>{children}</>;
 
   return (
@@ -41,7 +40,6 @@ export function AccessGate({ children }: { children: React.ReactNode }) {
           animate={{ opacity: 1, y: 0 }}
           className="w-full max-w-sm flex flex-col items-center text-center"
         >
-          {/* Logo */}
           <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mb-6">
             <span className="text-3xl">🌿</span>
           </div>
