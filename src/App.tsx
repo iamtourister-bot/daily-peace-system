@@ -1,3 +1,4 @@
+import { AccessGate } from "@/components/AccessGate";
 import SleepStories from "@/pages/SleepStories";
 import CalmingRoom from "@/pages/CalmingRoom";
 import { Layout } from "@/components/Layout";
