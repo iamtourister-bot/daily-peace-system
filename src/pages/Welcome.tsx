@@ -36,19 +36,28 @@ export default function Welcome() {
 
   const getGreeting = () => {
     switch (timeOfDay) {
-      case "morning": return "Good morning.";
-      case "afternoon": return "Good afternoon.";
-      case "evening": return "Good evening.";
-      case "night": return "It's late.";
+      case "morning": return "Good morning — Ready to take a moment just for you?";
+      case "afternoon": return "Good afternoon. A moment to recenter.";
+      case "evening": return "Good evening — Ready to slow down and unwind?";
+      case "night": return "It's late. Rest is within reach.";
     }
   };
 
   const getSubline = () => {
     switch (timeOfDay) {
-      case "morning": return "Let's set the tone for today.";
-      case "afternoon": return "A moment to recenter.";
-      case "evening": return "Time to wind down.";
-      case "night": return "Rest is within reach.";
+      case "morning": return "Your morning reset is waiting.";
+      case "afternoon": return "Take one breath. Start from here.";
+      case "evening": return "Let tonight be gentler than today.";
+      case "night": return "You made it through the day. That counts.";
+    }
+  };
+
+  const getButtonText = () => {
+    switch (timeOfDay) {
+      case "morning": return "Begin morning reset";
+      case "afternoon": return "Begin your reset";
+      case "evening": return "Begin wind down";
+      case "night": return "Find some rest";
     }
   };
 
@@ -60,7 +69,6 @@ export default function Welcome() {
           style={{ backgroundImage: `url(${scene.url})` }}
         />
         <div className="absolute inset-0 bg-gradient-to-b from-black/30 via-black/20 to-black/70" />
-
         <button
           onClick={toggleTheme}
           className="absolute top-6 right-6 p-2.5 text-white/70 hover:text-white transition-colors z-10 bg-black/20 rounded-full backdrop-blur-sm"
@@ -76,19 +84,18 @@ export default function Welcome() {
             transition={{ duration: 1, ease: "easeOut" }}
           >
             <p className="text-white/60 text-sm font-medium uppercase tracking-widest mb-4">Reset</p>
-            <h1 className="text-5xl font-serif text-white mb-2 leading-tight">{getGreeting()}</h1>
-            <p className="text-white/70 text-xl mb-10">{getSubline()}</p>
+            <h1 className="text-4xl font-serif text-white mb-3 leading-tight">{getGreeting()}</h1>
+            <p className="text-white/70 text-lg mb-10">{getSubline()}</p>
 
             <Link href="/state">
               <button
                 className="w-full bg-white/15 text-white py-4 rounded-2xl font-medium text-lg border border-white/30 backdrop-blur-sm hover:bg-white/25 transition-colors active:scale-[0.98] flex items-center justify-center gap-2"
                 data-testid="btn-begin"
               >
-                Begin your reset
+                {getButtonText()}
                 <ChevronRight className="w-5 h-5" />
               </button>
             </Link>
-
             <Link href="/quick-reset">
               <button
                 className="w-full mt-3 text-white/70 py-3 rounded-2xl font-medium text-base hover:text-white transition-colors"
