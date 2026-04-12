@@ -5,7 +5,6 @@ import { Layout } from "@/components/Layout";
 import { Switch, Route, Router as WouterRouter } from "wouter";
 import { ThemeProvider } from "@/contexts/ThemeContext";
 import { SessionProvider } from "@/contexts/SessionContext";
-
 import Welcome from "@/pages/Welcome";
 import StateEntry from "@/pages/StateEntry";
 import AutoPath from "@/pages/AutoPath";
@@ -25,7 +24,6 @@ import NotFound from "@/pages/not-found";
 
 function AppRouter() {
   return (
-  
     <Layout>
       <Switch>
         <Route path="/" component={Welcome} />
@@ -64,4 +62,5 @@ function App() {
     </ThemeProvider>
   );
 }
+
 export default App;
