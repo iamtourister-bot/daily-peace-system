@@ -87,13 +87,7 @@ export function AccessGate({ children }: { children: React.ReactNode }) {
           </div>
 
           <p className="text-xs text-muted-foreground">
-            No code yet?{" "}
-            
-              href="#"
-              className="text-primary underline underline-offset-4"
-            >
-              Get access here
-            </a>
+            No code yet? Get access to continue.
           </p>
         </motion.div>
       </AnimatePresence>
