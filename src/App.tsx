@@ -25,6 +25,7 @@ import NotFound from "@/pages/not-found";
 
 function AppRouter() {
   return (
+  
     <Layout>
       <Switch>
         <Route path="/" component={Welcome} />
@@ -49,6 +50,7 @@ function AppRouter() {
     </Layout>
   );
 }
+
 function App() {
   return (
     <ThemeProvider>
