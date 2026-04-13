@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useLocation } from "wouter";
 import { motion, AnimatePresence } from "framer-motion";
 import { PageTransition } from "@/components/PageTransition";
-import { Play, X, ChevronRight, Clock, ArrowLeft } from "lucide-react";
+import { Play, X, ChevronRight, ArrowLeft } from "lucide-react";
 
 const NATURE_IMAGES = {
   forest: "https://images.unsplash.com/photo-1448375240586-882707db888b?w=800&auto=format&fit=crop&q=80",
@@ -21,7 +21,6 @@ interface Meditation {
   id: string;
   title: string;
   subtitle: string;
-  duration: string;
   image: string;
   tag: string;
   intro: string;
@@ -33,7 +32,6 @@ const MEDITATIONS: Meditation[] = [
     id: "morning",
     title: "Morning Clarity",
     subtitle: "Start with intention",
-    duration: "7 min",
     image: NATURE_IMAGES.sunrise,
     tag: "Morning",
     intro: "A gentle way to open the day. Let the night release from your body.",
@@ -41,7 +39,7 @@ const MEDITATIONS: Meditation[] = [
       { text: "Find a comfortable position. Let your eyes soften or close gently. Take a moment just to arrive here.", duration: 12000 },
       { text: "Take three deep breaths. Each exhale is a signal to your body that this is a safe moment.", duration: 12000 },
       { text: "Notice how your body feels this morning. Heavy? Light? Tense somewhere? Just observe. No need to change anything.", duration: 14000 },
-      { text: "Think of one thing you're stepping into today. Not a list — just one thing. Hold it gently.", duration: 12000 },
+      { text: "Think of one thing you are stepping into today. Not a list — just one thing. Hold it gently.", duration: 12000 },
       { text: "Now set a single intention. Not a goal. An intention. How do you want to move through this day?", duration: 14000 },
       { text: "Breathe in: I am present. Breathe out: I am ready.", duration: 12000 },
       { text: "When you open your eyes, carry this stillness with you for just the first few minutes of your day.", duration: 12000 },
@@ -51,17 +49,16 @@ const MEDITATIONS: Meditation[] = [
     id: "anxiety",
     title: "Anxiety Relief",
     subtitle: "Quiet the storm inside",
-    duration: "10 min",
     image: NATURE_IMAGES.ocean,
     tag: "Anxiety",
     intro: "When your mind is racing, this session helps you return to your body — the one place anxiety cannot fully reach.",
     steps: [
-      { text: "Wherever you are, place both feet flat on the floor. Feel the ground. It's solid. It's holding you.", duration: 14000 },
+      { text: "Wherever you are, place both feet flat on the floor. Feel the ground. It is solid. It is holding you.", duration: 14000 },
       { text: "Place one hand on your chest. Feel it rise and fall. This is happening. This breath. This moment. Not tomorrow.", duration: 14000 },
       { text: "Breathe in for 4 counts. Hold for 2. Out for 6. The extended exhale activates your body's calming system.", duration: 16000 },
       { text: "Your thoughts are not facts. They are electrical signals. They rise and they pass, like weather. You are not the weather.", duration: 14000 },
       { text: "Name three things you can feel physically right now. The chair. Your clothes. The temperature of the air.", duration: 14000 },
-      { text: "The anxious feeling is not permanent. It has a peak. You've already started descending from it.", duration: 12000 },
+      { text: "The anxious feeling is not permanent. It has a peak. You have already started descending from it.", duration: 12000 },
       { text: "Breathe slowly. You don't have to figure anything out right now. Just be here for one more breath.", duration: 14000 },
       { text: "You are more capable than anxiety tells you. That voice is not the truth. This stillness — this is closer to the truth.", duration: 14000 },
     ]
@@ -70,18 +67,17 @@ const MEDITATIONS: Meditation[] = [
     id: "sleep",
     title: "Sleep Preparation",
     subtitle: "Let the day dissolve",
-    duration: "15 min",
     image: NATURE_IMAGES.mountain,
     tag: "Night",
     intro: "Your body knows how to sleep. This session helps your mind step aside and let it happen.",
     steps: [
       { text: "Lie down if you can. Close your eyes. The day is done. Whatever didn't happen can wait.", duration: 14000 },
-      { text: "Starting with your toes — let them go. Release any tension you've been holding there without knowing.", duration: 14000 },
+      { text: "Starting with your toes — let them go. Release any tension you have been holding there without knowing.", duration: 14000 },
       { text: "Your calves... your knees... your thighs. Let them sink into the surface beneath you.", duration: 14000 },
       { text: "Your lower back, your stomach, your chest. With each exhale, let gravity do the work.", duration: 14000 },
       { text: "Your hands, your arms, your shoulders. The weight of the day is setting down.", duration: 14000 },
       { text: "Your jaw. Your forehead. The tiny muscles around your eyes. All of it — soften.", duration: 14000 },
-      { text: "Imagine you're floating in warm, still water. Supported completely. Nothing to hold onto. Nothing to solve.", duration: 16000 },
+      { text: "Imagine you are floating in warm, still water. Supported completely. Nothing to hold onto. Nothing to solve.", duration: 16000 },
       { text: "If thoughts come — and they will — simply notice them and return to the weight of your body.", duration: 14000 },
       { text: "Your breath is slower now. Your heartbeat is quieter. You are safe. Everything is handled.", duration: 14000 },
       { text: "There is nothing more to do tonight. Rest is the work now. Let yourself drift.", duration: 14000 },
@@ -91,34 +87,32 @@ const MEDITATIONS: Meditation[] = [
     id: "body",
     title: "Body Release",
     subtitle: "Let tension melt away",
-    duration: "8 min",
     image: NATURE_IMAGES.meadow,
     tag: "Tension",
     intro: "We carry emotion in our muscles. This session releases what your body has been holding all day.",
     steps: [
-      { text: "Sit or lie comfortably. We're going to move through your body systematically — releasing as we go.", duration: 12000 },
+      { text: "Sit or lie comfortably. We are going to move through your body — releasing as we go.", duration: 12000 },
       { text: "Curl your toes tightly for 5 seconds... then release. Feel the difference. That contrast is release.", duration: 14000 },
       { text: "Tighten your thigh muscles for 5 seconds... squeeze... now let go. The release is the point.", duration: 14000 },
       { text: "Suck your stomach in tightly... hold it... now exhale and let it all go. Soften your belly completely.", duration: 14000 },
-      { text: "Shrug your shoulders up to your ears, as tight as possible... hold... now drop them. That's where most of us live.", duration: 14000 },
+      { text: "Shrug your shoulders up to your ears, as tight as possible... hold... now drop them. That is where most of us live.", duration: 14000 },
       { text: "Clench your jaw and scrunch your face tightly... hold... now smooth it out. Let your face be expressionless.", duration: 14000 },
-      { text: "Now scan your whole body. Notice how much lighter it feels. That wasn't just muscle. That was emotion.", duration: 14000 },
+      { text: "Now scan your whole body. Notice how much lighter it feels. That was not just muscle. That was emotion.", duration: 14000 },
     ]
   },
   {
     id: "peace",
     title: "Inner Peace",
     subtitle: "Return to your center",
-    duration: "12 min",
     image: NATURE_IMAGES.forest,
     tag: "Deep Calm",
     intro: "A deeper journey inward. This one is for when you want to remember who you are beneath the noise.",
     steps: [
-      { text: "Settle in. There's nowhere to be but here. This moment is complete as it is.", duration: 12000 },
+      { text: "Settle in. There is nowhere to be but here. This moment is complete as it is.", duration: 12000 },
       { text: "Breathe naturally. Don't control it. Just watch your breath rise and fall like a wave you don't need to steer.", duration: 14000 },
       { text: "Imagine a place where you feel completely at ease. It can be real or imagined. Step into it slowly.", duration: 14000 },
       { text: "In this place, there is no version of you that needs to perform or achieve. You are enough simply by being.", duration: 16000 },
-      { text: "Notice any tightness in your heart. Old worries. Old grief. Acknowledge them gently — you've been carrying them.", duration: 16000 },
+      { text: "Notice any tightness in your heart. Old worries. Old grief. Acknowledge them gently — you have been carrying them.", duration: 16000 },
       { text: "Now imagine setting that weight down. Not abandoning it. Just... resting it for a while.", duration: 14000 },
       { text: "Who are you without the worry? Without the role you play for others? Sit with that question. Don't answer it.", duration: 16000 },
       { text: "You have survived everything that has tried to break you. That is not weakness. That is profound strength.", duration: 14000 },
@@ -128,18 +122,28 @@ const MEDITATIONS: Meditation[] = [
   }
 ];
 
+const POST_FEELINGS = [
+  { label: "Calmer", emoji: "🌿" },
+  { label: "Lighter", emoji: "☁️" },
+  { label: "Still heavy", emoji: "💙" },
+  { label: "Grateful", emoji: "💚" },
+  { label: "Tired", emoji: "🌙" },
+];
+
 export default function Meditations() {
   const [, setLocation] = useLocation();
   const [selected, setSelected] = useState<Meditation | null>(null);
   const [playing, setPlaying] = useState(false);
   const [stepIndex, setStepIndex] = useState(0);
   const [done, setDone] = useState(false);
+  const [postFeeling, setPostFeeling] = useState<string | null>(null);
 
   const startMeditation = (med: Meditation) => {
     setSelected(med);
     setPlaying(false);
     setStepIndex(0);
     setDone(false);
+    setPostFeeling(null);
   };
 
   const beginPlaying = () => {
@@ -162,6 +166,7 @@ export default function Meditations() {
     setPlaying(false);
     setStepIndex(0);
     setDone(false);
+    setPostFeeling(null);
   };
 
   if (selected && playing) {
@@ -176,7 +181,6 @@ export default function Meditations() {
         <button
           onClick={exitMeditation}
           className="absolute top-6 right-6 z-20 p-2 text-white/70 hover:text-white"
-          data-testid="btn-exit-meditation"
         >
           <X className="w-6 h-6" />
         </button>
@@ -229,12 +233,49 @@ export default function Meditations() {
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
             transition={{ duration: 1 }}
+            className="w-full max-w-sm"
           >
             <div className="w-16 h-16 rounded-full bg-white/10 border border-white/30 flex items-center justify-center mx-auto mb-8">
               <div className="w-8 h-8 rounded-full bg-white/30" />
             </div>
-            <h2 className="text-3xl font-serif text-white mb-4">Well done.</h2>
-            <p className="text-white/70 text-lg mb-12">You gave yourself {selected.duration} of real rest.</p>
+            <h2 className="text-3xl font-serif text-white mb-3">Well done.</h2>
+            <p className="text-white/70 text-lg mb-10">You showed up for yourself. That matters.</p>
+
+            {!postFeeling ? (
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.5 }}
+              >
+                <p className="text-white/80 text-base mb-5">How do you feel right now?</p>
+                <div className="flex flex-wrap gap-3 justify-center mb-8">
+                  {POST_FEELINGS.map((f) => (
+                    <button
+                      key={f.label}
+                      onClick={() => setPostFeeling(f.label)}
+                      className="px-4 py-2 rounded-full bg-white/10 border border-white/20 text-white text-sm hover:bg-white/20 transition-colors"
+                    >
+                      {f.emoji} {f.label}
+                    </button>
+                  ))}
+                </div>
+              </motion.div>
+            ) : (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="mb-8"
+              >
+                <p className="text-white/80 text-lg font-serif mb-6">
+                  {postFeeling === "Calmer" && "That's the reset working. Hold onto it."}
+                  {postFeeling === "Lighter" && "Good. You put something down just now."}
+                  {postFeeling === "Still heavy" && "That's okay. You still showed up. That counts."}
+                  {postFeeling === "Grateful" && "Gratitude after stillness is real. Carry that."}
+                  {postFeeling === "Tired" && "Rest is the right response. Let yourself be tired."}
+                </p>
+              </motion.div>
+            )}
+
             <button
               onClick={exitMeditation}
               className="px-8 py-3 bg-white/20 text-white rounded-full border border-white/30 font-medium hover:bg-white/30 transition-colors"
@@ -271,18 +312,14 @@ export default function Meditations() {
           >
             <span className="text-white/60 text-xs font-semibold uppercase tracking-widest mb-3 block">{selected.tag}</span>
             <h1 className="text-4xl font-serif text-white mb-2">{selected.title}</h1>
-            <div className="flex items-center gap-2 text-white/60 mb-6">
-              <Clock className="w-4 h-4" />
-              <span className="text-sm">{selected.duration}</span>
-            </div>
+            <p className="text-white/60 text-sm mb-6">Guided moment</p>
             <p className="text-white/80 text-lg leading-relaxed mb-10">{selected.intro}</p>
             <button
               onClick={beginPlaying}
               className="w-full py-4 bg-white/20 border border-white/40 text-white rounded-2xl font-medium text-lg backdrop-blur-sm hover:bg-white/30 transition-colors flex items-center justify-center gap-3"
-              data-testid="btn-start-meditation"
             >
               <Play className="w-5 h-5" />
-              Begin
+              Begin when ready
             </button>
           </motion.div>
         </div>
@@ -311,7 +348,6 @@ export default function Meditations() {
               transition={{ delay: i * 0.08 }}
               onClick={() => startMeditation(med)}
               className="relative rounded-3xl overflow-hidden h-44 w-full text-left"
-              data-testid={`card-meditation-${med.id}`}
             >
               <img
                 src={med.image}
@@ -325,10 +361,6 @@ export default function Meditations() {
                   <div>
                     <h3 className="text-white text-xl font-serif">{med.title}</h3>
                     <p className="text-white/70 text-sm">{med.subtitle}</p>
-                  </div>
-                  <div className="flex items-center gap-1 text-white/70">
-                    <Clock className="w-3.5 h-3.5" />
-                    <span className="text-xs">{med.duration}</span>
                   </div>
                 </div>
               </div>
