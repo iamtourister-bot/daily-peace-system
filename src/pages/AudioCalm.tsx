@@ -218,7 +218,7 @@ export default function AudioCalm() {
   const [selected, setSelected] = useState<SoundId | null>(null);
   const [showDetail, setShowDetail] = useState(false);
   const [, setLocation] = useLocation();
-  const { playing, play, stop, volume, setVolume } = useAudioEngine();
+  const { playing, play, stop, volume, setVolume, resumeCtx } = useAudioEngine();
   const [elapsed, setElapsed] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -240,7 +240,8 @@ export default function AudioCalm() {
     return `${m}:${sec.toString().padStart(2, "0")}`;
   };
 
-  const handleSelect = (id: SoundId) => {
+  const handleSelect = async (id: SoundId) => {
+    await resumeCtx();
     setSelected(id);
     setElapsed(0);
     setShowDetail(true);
@@ -254,10 +255,11 @@ export default function AudioCalm() {
     setElapsed(0);
   };
 
-  const handleTogglePlay = () => {
+  const handleTogglePlay = async () => {
     if (isPlaying) {
       stop();
     } else if (selected) {
+      await resumeCtx();
       setElapsed(0);
       play(selected);
     }
