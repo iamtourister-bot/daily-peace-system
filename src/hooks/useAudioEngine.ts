@@ -405,90 +405,82 @@ export function useAudioEngine() {
     // ── 8. FIREPLACE ─────────────────────────────────────────────────────────
     // Sound: warm pink noise base (fire roar) + slow LFO for fire breathing +
     // scheduled random crackles (sharp band-passed white noise bursts)
-   if (id === "fire") {
-  // Deep wood base — low crackle body
-  const baseSrc = ctx.createBufferSource();
-  baseSrc.buffer = makeBrownNoise(ctx, 6);
-  baseSrc.loop = true;
-  const baseLp = ctx.createBiquadFilter();
-  baseLp.type = "lowpass";
-  baseLp.frequency.value = 300;
-  const baseGain = ctx.createGain();
-  baseGain.gain.value = 0.3;
-  baseSrc.connect(baseLp);
-  baseLp.connect(baseGain);
-  baseGain.connect(master);
-  baseSrc.start();
+  if (id === "fire") {
+  // Warm mid-range fire roar — higher frequency than ocean
+  const roarSrc = ctx.createBufferSource();
+  roarSrc.buffer = makePinkNoise(ctx, 6);
+  roarSrc.loop = true;
+  const roarBp = ctx.createBiquadFilter();
+  roarBp.type = "bandpass";
+  roarBp.frequency.value = 800;
+  roarBp.Q.value = 0.5;
+  const roarGain = ctx.createGain();
+  roarGain.gain.value = 0.5;
+  roarSrc.connect(roarBp);
+  roarBp.connect(roarGain);
+  roarGain.connect(master);
+  roarSrc.start();
 
-  // Hissing fire body — mid range pink noise
-  const hissSrc = ctx.createBufferSource();
-  hissSrc.buffer = makePinkNoise(ctx, 6);
-  hissSrc.loop = true;
-  const hissBp = ctx.createBiquadFilter();
-  hissBp.type = "bandpass";
-  hissBp.frequency.value = 1200;
-  hissBp.Q.value = 0.8;
-  const hissGain = ctx.createGain();
-  hissGain.gain.value = 0.25;
-  // Breathing lfo
-  const breathLfo = ctx.createOscillator();
-  breathLfo.type = "sine";
-  breathLfo.frequency.value = 0.15;
-  const breathAmp = ctx.createGain();
-  breathAmp.gain.value = 0.12;
-  breathLfo.connect(breathAmp);
-  breathAmp.connect(hissGain.gain);
-  breathLfo.start();
-  hissSrc.connect(hissBp);
-  hissBp.connect(hissGain);
-  hissGain.connect(master);
-  hissSrc.start();
+  // High crackle layer
+  const crackSrc = ctx.createBufferSource();
+  crackSrc.buffer = makePinkNoise(ctx, 4);
+  crackSrc.loop = true;
+  const crackHp = ctx.createBiquadFilter();
+  crackHp.type = "highpass";
+  crackHp.frequency.value = 3000;
+  const crackGain = ctx.createGain();
+  crackGain.gain.value = 0.2;
+  crackSrc.connect(crackHp);
+  crackHp.connect(crackGain);
+  crackGain.connect(master);
+  crackSrc.start();
 
-  // Random wood crackles and pops
+  // Fast irregular fire flicker LFO
+  const flickerLfo = ctx.createOscillator();
+  flickerLfo.type = "sawtooth";
+  flickerLfo.frequency.value = 8;
+  const flickerAmp = ctx.createGain();
+  flickerAmp.gain.value = 0.15;
+  flickerLfo.connect(flickerAmp);
+  flickerAmp.connect(roarGain.gain);
+  flickerLfo.start();
+
+  // Sharp wood crackles and pops
   let active = true;
   const scheduleCrackle = () => {
     if (!active) return;
-    const delay = 200 + Math.random() * 1800;
+    const delay = 150 + Math.random() * 1200;
     const t = setTimeout(() => {
       if (!active) return;
       const now = ctx.currentTime;
-      const isBigPop = Math.random() > 0.7;
-
+      const isBigPop = Math.random() > 0.65;
       if (isBigPop) {
-        // Deep wood pop
-        const popBuf = makeWhiteNoise(ctx, 0.04);
+        const popBuf = makeWhiteNoise(ctx, 0.05);
         const pop = ctx.createBufferSource();
         pop.buffer = popBuf;
-        const popLp = ctx.createBiquadFilter();
-        popLp.type = "lowpass";
-        popLp.frequency.value = 400;
+        const popBp = ctx.createBiquadFilter();
+        popBp.type = "bandpass";
+        popBp.frequency.value = 600 + Math.random() * 400;
+        popBp.Q.value = 3;
         const popGain = ctx.createGain();
-        popGain.gain.setValueAtTime(0.8, now);
-        popGain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
-        pop.connect(popLp);
-        popLp.connect(popGain);
-        popGain.connect(master);
-        pop.start(now);
-        pop.stop(now + 0.15);
+        popGain.gain.setValueAtTime(1.2, now);
+        popGain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+        pop.connect(popBp); popBp.connect(popGain); popGain.connect(master);
+        pop.start(now); pop.stop(now + 0.12);
       } else {
-        // Sharp crackle
         const crkBuf = makeWhiteNoise(ctx, 0.02);
         const crk = ctx.createBufferSource();
         crk.buffer = crkBuf;
         const crkBp = ctx.createBiquadFilter();
         crkBp.type = "bandpass";
-        crkBp.frequency.value = 2000 + Math.random() * 5000;
-        crkBp.Q.value = 12;
+        crkBp.frequency.value = 3000 + Math.random() * 6000;
+        crkBp.Q.value = 15;
         const crkGain = ctx.createGain();
-        crkGain.gain.setValueAtTime(0.3 + Math.random() * 0.4, now);
-        crkGain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
-        crk.connect(crkBp);
-        crkBp.connect(crkGain);
-        crkGain.connect(master);
-        crk.start(now);
-        crk.stop(now + 0.06);
+        crkGain.gain.setValueAtTime(0.5 + Math.random() * 0.5, now);
+        crkGain.gain.exponentialRampToValueAtTime(0.001, now + 0.04);
+        crk.connect(crkBp); crkBp.connect(crkGain); crkGain.connect(master);
+        crk.start(now); crk.stop(now + 0.05);
       }
-
       scheduleCrackle();
     }, delay);
     cleanups.push(() => clearTimeout(t));
@@ -497,15 +489,14 @@ export function useAudioEngine() {
 
   cleanups.push(() => {
     active = false;
-    try { baseSrc.stop(); baseSrc.disconnect(); } catch {}
-    try { hissSrc.stop(); hissSrc.disconnect(); } catch {}
-    try { breathLfo.stop(); breathLfo.disconnect(); } catch {}
-    baseLp.disconnect(); baseGain.disconnect();
-    hissBp.disconnect(); hissGain.disconnect();
-    breathAmp.disconnect();
+    try { roarSrc.stop(); roarSrc.disconnect(); } catch {}
+    try { crackSrc.stop(); crackSrc.disconnect(); } catch {}
+    try { flickerLfo.stop(); flickerLfo.disconnect(); } catch {}
+    roarBp.disconnect(); roarGain.disconnect();
+    crackHp.disconnect(); crackGain.disconnect();
+    flickerAmp.disconnect();
   });
 }
-
     // ── 9. AUTUMN WIND ───────────────────────────────────────────────────────
     // Sound: medium-frequency band-passed pink noise for wind tone + slow
     // swelling LFO + high-frequency leaf rustle bursts
