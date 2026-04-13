@@ -95,282 +95,261 @@ const SOUNDS: {
   },
 ];
 
-// ── CANVAS VISUALIZERS ──────────────────────────────────────────────
+// ── CANVAS VISUALIZERS ──────────────────────────────────────────────────────
 
+// 1. RAIN — motion-trail drops + elliptical splash ripples + bounce droplets
 function RainCanvas({ playing }: { playing: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number>(0);
-  const dropsRef = useRef<{ x: number; y: number; speed: number; length: number; opacity: number }[]>([]);
+  const state = useRef<{ drops: any[]; splashes: any[] }>({ drops: [], splashes: [] });
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const canvas = canvasRef.current; if (!canvas) return;
     const ctx = canvas.getContext("2d")!;
-    canvas.width = canvas.offsetWidth;
-    canvas.height = canvas.offsetHeight;
+    canvas.width = canvas.offsetWidth; canvas.height = canvas.offsetHeight;
+    const W = canvas.width, H = canvas.height;
 
-    dropsRef.current = Array.from({ length: 120 }, () => ({
-      x: Math.random() * canvas.width,
-      y: Math.random() * canvas.height,
-      speed: 4 + Math.random() * 6,
-      length: 10 + Math.random() * 20,
-      opacity: 0.2 + Math.random() * 0.5,
-    }));
+    function mkDrop() {
+      const spd = 9 + Math.random() * 11;
+      return {
+        x: Math.random() * (W + 100) - 50, y: -20 - Math.random() * H * 0.6,
+        vx: spd * 0.18, vy: spd, thick: 0.5 + Math.random() * 0.9,
+        alpha: 0.2 + Math.random() * 0.5, trail: [] as { x: number; y: number }[],
+      };
+    }
+    function splash(x: number, y: number) {
+      for (let i = 0; i < 4 + Math.random() * 5; i++) {
+        const a = -Math.PI + Math.random() * Math.PI, s = 1 + Math.random() * 3;
+        state.current.splashes.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 2, life: 1, dec: 0.07 + Math.random() * 0.06, r: 0.4 + Math.random() * 1.2 });
+      }
+      state.current.splashes.push({ rip: true, x, y, r: 0, life: 1 });
+    }
+
+    const { drops, splashes } = state.current;
+    drops.length = 0; splashes.length = 0;
+    for (let i = 0; i < 220; i++) { const d = mkDrop(); d.y = Math.random() * H; drops.push(d); }
 
     const draw = () => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.clearRect(0, 0, W, H);
       if (playing) {
-        dropsRef.current.forEach(drop => {
-          ctx.beginPath();
-          ctx.strokeStyle = `rgba(180, 210, 255, ${drop.opacity})`;
-          ctx.lineWidth = 1;
-          ctx.moveTo(drop.x, drop.y);
-          ctx.lineTo(drop.x - 2, drop.y + drop.length);
-          ctx.stroke();
-          drop.y += drop.speed;
-          if (drop.y > canvas.height) {
-            drop.y = -drop.length;
-            drop.x = Math.random() * canvas.width;
+        drops.forEach(d => {
+          d.vy += 0.025; d.x += d.vx; d.y += d.vy;
+          d.trail.push({ x: d.x, y: d.y }); if (d.trail.length > 5) d.trail.shift();
+          if (d.y > H + 5) { if (Math.random() < 0.55) splash(d.x, H - 3); Object.assign(d, mkDrop()); }
+          if (d.trail.length > 1) {
+            ctx.beginPath(); ctx.moveTo(d.trail[0].x, d.trail[0].y);
+            d.trail.forEach(p => ctx.lineTo(p.x, p.y));
+            ctx.lineTo(d.x + d.vx * 0.5, d.y + d.vy * 0.5);
+            ctx.strokeStyle = `rgba(175,212,255,${d.alpha})`; ctx.lineWidth = d.thick; ctx.lineCap = "round"; ctx.stroke();
           }
         });
+        for (let i = splashes.length - 1; i >= 0; i--) {
+          const s = splashes[i];
+          if (s.rip) {
+            s.r += 0.9; s.life -= 0.055;
+            if (s.life <= 0) { splashes.splice(i, 1); continue; }
+            ctx.beginPath(); ctx.ellipse(s.x, s.y, s.r, s.r * 0.28, 0, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(175,212,255,${s.life * 0.28})`; ctx.lineWidth = 0.7; ctx.stroke();
+          } else {
+            s.vy += 0.18; s.x += s.vx; s.y += s.vy; s.life -= s.dec;
+            if (s.life <= 0 || s.y > H + 5) { splashes.splice(i, 1); continue; }
+            ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(200,228,255,${s.life * 0.55})`; ctx.fill();
+          }
+        }
       }
       animRef.current = requestAnimationFrame(draw);
     };
     draw();
     return () => cancelAnimationFrame(animRef.current);
   }, [playing]);
-
   return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
 }
 
+// 2. THUNDER — same heavy rain + recursive branching lightning + full-screen flash
 function ThunderCanvas({ playing }: { playing: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number>(0);
-  const dropsRef = useRef<{ x: number; y: number; speed: number; length: number }[]>([]);
-  const flashRef = useRef(0);
-  const nextFlashRef = useRef(Math.random() * 5000 + 3000);
-  const lastTimeRef = useRef(0);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const canvas = canvasRef.current; if (!canvas) return;
     const ctx = canvas.getContext("2d")!;
-    canvas.width = canvas.offsetWidth;
-    canvas.height = canvas.offsetHeight;
+    canvas.width = canvas.offsetWidth; canvas.height = canvas.offsetHeight;
+    const W = canvas.width, H = canvas.height;
+    const drops: any[] = [];
+    let flash = 0, nextFlash = 6000, lt = 0, boltX = W / 2;
 
-    dropsRef.current = Array.from({ length: 150 }, () => ({
-      x: Math.random() * canvas.width,
-      y: Math.random() * canvas.height,
-      speed: 6 + Math.random() * 8,
-      length: 15 + Math.random() * 25,
-    }));
+    function mkDrop() {
+      const s = 8 + Math.random() * 12;
+      return { x: Math.random() * (W + 100) - 50, y: -20, vx: s * 0.22, vy: s, alpha: 0.3 + Math.random() * 0.45, trail: [] as any[] };
+    }
+    for (let i = 0; i < 200; i++) { const d = mkDrop(); d.y = Math.random() * H; drops.push(d); }
 
-    const drawLightning = (x: number, y: number, len: number, angle: number, depth: number) => {
-      if (depth === 0 || len < 5) return;
-      const endX = x + Math.cos(angle) * len;
-      const endY = y + Math.sin(angle) * len;
-      ctx.beginPath();
-      ctx.strokeStyle = `rgba(255, 255, 200, ${0.9 - depth * 0.15})`;
-      ctx.lineWidth = depth * 0.8;
-      ctx.moveTo(x, y);
-      ctx.lineTo(endX, endY);
-      ctx.stroke();
-      drawLightning(endX, endY, len * 0.7, angle + (Math.random() - 0.5) * 1.2, depth - 1);
-      if (Math.random() > 0.6) {
-        drawLightning(endX, endY, len * 0.5, angle + (Math.random() - 0.5) * 1.5, depth - 2);
-      }
-    };
+    function bolt(x: number, y: number, len: number, angle: number, depth: number) {
+      if (depth < 1 || len < 4) return;
+      const ex = x + Math.cos(angle) * len, ey = y + Math.sin(angle) * len;
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(ex, ey);
+      ctx.strokeStyle = `rgba(220,230,255,${0.85 - depth * 0.12})`; ctx.lineWidth = depth * 0.7; ctx.stroke();
+      bolt(ex, ey, len * 0.68, angle + (Math.random() - 0.5) * 1.1, depth - 1);
+      if (Math.random() > 0.55) bolt(ex, ey, len * 0.45, angle + (Math.random() - 0.5) * 1.4, depth - 2);
+    }
 
-    const draw = (timestamp: number) => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-
+    const draw = (ts: number) => {
+      ctx.clearRect(0, 0, W, H);
       if (playing) {
-        // Heavy rain
-        dropsRef.current.forEach(drop => {
-          ctx.beginPath();
-          ctx.strokeStyle = `rgba(150, 180, 220, 0.4)`;
-          ctx.lineWidth = 1.5;
-          ctx.moveTo(drop.x, drop.y);
-          ctx.lineTo(drop.x - 3, drop.y + drop.length);
-          ctx.stroke();
-          drop.y += drop.speed;
-          if (drop.y > canvas.height) {
-            drop.y = -drop.length;
-            drop.x = Math.random() * canvas.width;
+        drops.forEach(d => {
+          d.vy += 0.03; d.x += d.vx; d.y += d.vy;
+          d.trail.push({ x: d.x, y: d.y }); if (d.trail.length > 4) d.trail.shift();
+          if (d.y > H + 5) Object.assign(d, mkDrop());
+          if (d.trail.length > 1) {
+            ctx.beginPath(); ctx.moveTo(d.trail[0].x, d.trail[0].y);
+            d.trail.forEach(p => ctx.lineTo(p.x, p.y));
+            ctx.strokeStyle = `rgba(160,195,240,${d.alpha})`; ctx.lineWidth = 0.8; ctx.lineCap = "round"; ctx.stroke();
           }
         });
-
-        // Lightning flash
-        const elapsed = timestamp - lastTimeRef.current;
-        lastTimeRef.current = timestamp;
-        nextFlashRef.current -= elapsed;
-
-        if (nextFlashRef.current <= 0) {
-          flashRef.current = 8;
-          nextFlashRef.current = Math.random() * 8000 + 4000;
-        }
-
-        if (flashRef.current > 0) {
-          const alpha = flashRef.current / 8;
-          ctx.fillStyle = `rgba(200, 220, 255, ${alpha * 0.3})`;
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
-          if (flashRef.current === 8) {
-            const lx = canvas.width * 0.3 + Math.random() * canvas.width * 0.4;
-            drawLightning(lx, 0, 80, Math.PI / 2 + (Math.random() - 0.5) * 0.5, 5);
-          }
-          flashRef.current--;
+        const dt = lt ? ts - lt : 16; lt = ts;
+        nextFlash -= dt;
+        if (nextFlash <= 0) { flash = 10; nextFlash = 7000 + Math.random() * 10000; boltX = W * 0.25 + Math.random() * W * 0.5; }
+        if (flash > 0) {
+          ctx.fillStyle = `rgba(210,225,255,${(flash / 10) * 0.25})`; ctx.fillRect(0, 0, W, H);
+          if (flash === 10) bolt(boltX, 0, H * 0.45, Math.PI / 2 + (Math.random() - 0.5) * 0.4, 6);
+          flash--;
         }
       }
-
       animRef.current = requestAnimationFrame(draw);
     };
     animRef.current = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(animRef.current);
   }, [playing]);
-
   return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
 }
 
+// 3. OCEAN — 5 layered sinusoidal wave bands with parallax depth + foam crests + spray particles
+// Each layer moves at different speed to create real depth illusion
 function OceanCanvas({ playing }: { playing: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number>(0);
-  const timeRef = useRef(0);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const canvas = canvasRef.current; if (!canvas) return;
     const ctx = canvas.getContext("2d")!;
-    canvas.width = canvas.offsetWidth;
-    canvas.height = canvas.offsetHeight;
+    canvas.width = canvas.offsetWidth; canvas.height = canvas.offsetHeight;
+    const W = canvas.width, H = canvas.height;
+    let t = 0;
+
+    // Spray mist particles that ride wave crests
+    const spray: { x: number; y: number; vx: number; vy: number; life: number; r: number }[] = [];
+    for (let i = 0; i < 40; i++) {
+      spray.push({ x: Math.random() * W, y: H * 0.3 + Math.random() * H * 0.3, vx: (Math.random() - 0.5) * 0.5, vy: -Math.random() * 0.4, life: Math.random(), r: 0.5 + Math.random() * 1.5 });
+    }
+
+    // 5 wave layers — deeper layers are slower, darker, more transparent
+    const layers = [
+      { yFrac: 0.28, amp: 16, freq: 0.011, spd: 1.0, color: "90,165,215", alpha: 0.22 },
+      { yFrac: 0.40, amp: 11, freq: 0.015, spd: 0.75, color: "70,145,200", alpha: 0.18 },
+      { yFrac: 0.50, amp: 8, freq: 0.019, spd: 0.58, color: "50,125,188", alpha: 0.14 },
+      { yFrac: 0.59, amp: 5, freq: 0.024, spd: 0.42, color: "35,108,175", alpha: 0.11 },
+      { yFrac: 0.67, amp: 3, freq: 0.030, spd: 0.28, color: "25,90,160", alpha: 0.08 },
+    ];
 
     const draw = () => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.clearRect(0, 0, W, H);
       if (playing) {
-        timeRef.current += 0.008;
-        const t = timeRef.current;
-        const w = canvas.width;
-        const h = canvas.height;
+        t += 0.007;
 
-        for (let i = 0; i < 5; i++) {
-          const yBase = h * 0.4 + i * 30;
-          const amp = 12 - i * 1.5;
-          const speed = 0.8 - i * 0.1;
-          const alpha = 0.15 - i * 0.02;
+        // Horizon shimmer
+        ctx.fillStyle = "rgba(30,80,140,0.04)";
+        ctx.fillRect(0, 0, W, H * 0.25);
 
-          ctx.beginPath();
-          ctx.moveTo(0, yBase);
-          for (let x = 0; x <= w; x += 4) {
-            const y = yBase + Math.sin(x * 0.015 + t * speed) * amp + Math.sin(x * 0.008 + t * speed * 0.7) * (amp * 0.5);
+        layers.forEach((l, li) => {
+          const yBase = H * l.yFrac;
+          // Fill wave body
+          ctx.beginPath(); ctx.moveTo(0, yBase);
+          for (let x = 0; x <= W; x += 3) {
+            const y = yBase
+              + Math.sin(x * l.freq + t * l.spd) * l.amp
+              + Math.sin(x * l.freq * 0.55 + t * l.spd * 0.7 + li) * l.amp * 0.45
+              + Math.sin(x * l.freq * 1.8 + t * l.spd * 1.4) * l.amp * 0.15;
             ctx.lineTo(x, y);
           }
-          ctx.lineTo(w, h);
-          ctx.lineTo(0, h);
-          ctx.closePath();
-          ctx.fillStyle = `rgba(100, 180, 220, ${alpha})`;
-          ctx.fill();
-        }
+          ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath();
+          ctx.fillStyle = `rgba(${l.color},${l.alpha})`; ctx.fill();
 
-        // Foam particles
-        for (let i = 0; i < 3; i++) {
-          const x = ((t * 30 * (i + 1)) % w);
-          const yBase = h * 0.4 + i * 30;
-          const y = yBase + Math.sin(x * 0.015 + t) * 12;
-          ctx.beginPath();
-          ctx.arc(x, y, 2 + i, 0, Math.PI * 2);
-          ctx.fillStyle = `rgba(255,255,255,0.3)`;
-          ctx.fill();
-        }
+          // Wave crest highlight line
+          ctx.beginPath(); ctx.moveTo(0, yBase);
+          for (let x = 0; x <= W; x += 3) {
+            const y = yBase
+              + Math.sin(x * l.freq + t * l.spd) * l.amp
+              + Math.sin(x * l.freq * 0.55 + t * l.spd * 0.7 + li) * l.amp * 0.45
+              + Math.sin(x * l.freq * 1.8 + t * l.spd * 1.4) * l.amp * 0.15;
+            ctx.lineTo(x, y);
+          }
+          ctx.strokeStyle = `rgba(255,255,255,${l.alpha * 0.8})`; ctx.lineWidth = li === 0 ? 1.2 : 0.6; ctx.stroke();
+        });
+
+        // Spray / foam particles
+        spray.forEach(p => {
+          p.x += p.vx; p.y += p.vy; p.life -= 0.006;
+          if (p.life <= 0) {
+            p.x = Math.random() * W; p.y = H * (0.28 + Math.random() * 0.25);
+            p.vx = (Math.random() - 0.5) * 0.5; p.vy = -Math.random() * 0.3; p.life = 0.8 + Math.random() * 0.2;
+          }
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(255,255,255,${p.life * 0.45})`; ctx.fill();
+        });
       }
       animRef.current = requestAnimationFrame(draw);
     };
     draw();
     return () => cancelAnimationFrame(animRef.current);
   }, [playing]);
-
   return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
 }
 
+// 4. FOREST — swaying procedural trees + god rays + flocking V-birds
 function ForestCanvas({ playing }: { playing: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number>(0);
-  const timeRef = useRef(0);
-  const birdsRef = useRef<{ x: number; y: number; vx: number; vy: number; size: number }[]>([]);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const canvas = canvasRef.current; if (!canvas) return;
     const ctx = canvas.getContext("2d")!;
-    canvas.width = canvas.offsetWidth;
-    canvas.height = canvas.offsetHeight;
+    canvas.width = canvas.offsetWidth; canvas.height = canvas.offsetHeight;
+    const W = canvas.width, H = canvas.height;
+    let t = 0;
+    const birds = Array.from({ length: 5 }, () => ({ x: Math.random() * W, y: 20 + Math.random() * 60, vx: 0.4 + Math.random() * 0.5, sz: 1.5 + Math.random() * 1.5 }));
+    const trees = [{ x: 0.08, h: 110, w: 28 }, { x: 0.2, h: 140, w: 35 }, { x: 0.35, h: 120, w: 30 }, { x: 0.5, h: 150, w: 38 }, { x: 0.65, h: 125, w: 32 }, { x: 0.79, h: 138, w: 36 }, { x: 0.93, h: 108, w: 27 }];
 
-    birdsRef.current = Array.from({ length: 6 }, () => ({
-      x: Math.random() * canvas.width,
-      y: 40 + Math.random() * 80,
-      vx: 0.3 + Math.random() * 0.5,
-      vy: 0,
-      size: 2 + Math.random() * 2,
-    }));
-
-    const drawTree = (x: number, h: number, sway: number) => {
-      ctx.beginPath();
-      ctx.strokeStyle = `rgba(60, 40, 20, 0.6)`;
-      ctx.lineWidth = 3;
-      ctx.moveTo(x, canvas.height);
-      ctx.lineTo(x + sway * 5, canvas.height - h * 0.4);
-      ctx.stroke();
-
+    function drawTree(x: number, h: number, w: number, sw: number) {
+      ctx.beginPath(); ctx.moveTo(x, H); ctx.quadraticCurveTo(x + sw * 3, H - h * 0.4, x + sw * 5, H - h * 0.45);
+      ctx.strokeStyle = "rgba(40,25,10,.7)"; ctx.lineWidth = 3; ctx.stroke();
       for (let i = 0; i < 3; i++) {
-        const py = canvas.height - h * 0.3 - i * h * 0.2;
-        const px = x + sway * (3 + i * 2);
-        const size = (40 - i * 8) + Math.sin(sway) * 3;
-        ctx.beginPath();
-        ctx.ellipse(px, py, size, size * 1.3, 0, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(30, ${80 + i * 20}, 30, 0.5)`;
-        ctx.fill();
+        const ty = H - h * 0.28 - i * h * 0.22, tx = x + sw * (3 + i * 2.5);
+        const rx = w * 0.55 - i * 3, ry = (w * 0.75 - i * 2) * (1 + Math.sin(t * 0.4 + i) * 0.03);
+        ctx.beginPath(); ctx.ellipse(tx, ty, Math.max(1, rx), Math.max(1, ry), 0, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${15 + i * 8},${55 + i * 18},${12 + i * 8},.55)`; ctx.fill();
       }
-    };
+    }
 
     const draw = () => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.clearRect(0, 0, W, H);
       if (playing) {
-        timeRef.current += 0.01;
-        const t = timeRef.current;
-
-        // Trees
-        const treePositions = [0.1, 0.25, 0.4, 0.55, 0.7, 0.85, 1.0];
-        treePositions.forEach((pos, i) => {
-          const sway = Math.sin(t * 0.5 + i) * 0.8;
-          drawTree(canvas.width * pos, 120 + (i % 3) * 30, sway);
-        });
-
-        // Light rays
+        t += 0.01;
         for (let i = 0; i < 3; i++) {
-          const lx = canvas.width * (0.2 + i * 0.3);
-          const grad = ctx.createLinearGradient(lx, 0, lx + 20, canvas.height * 0.6);
-          grad.addColorStop(0, `rgba(255, 220, 100, ${0.03 + Math.sin(t + i) * 0.01})`);
-          grad.addColorStop(1, "rgba(255, 220, 100, 0)");
-          ctx.beginPath();
-          ctx.moveTo(lx, 0);
-          ctx.lineTo(lx + 40, canvas.height * 0.6);
-          ctx.lineTo(lx - 10, canvas.height * 0.6);
-          ctx.closePath();
-          ctx.fillStyle = grad;
-          ctx.fill();
+          const lx = W * (0.18 + i * 0.32);
+          const grad = ctx.createLinearGradient(lx, 0, lx + 15, H * 0.65);
+          grad.addColorStop(0, `rgba(255,215,80,${0.025 + Math.sin(t + i) * 0.008})`);
+          grad.addColorStop(1, "rgba(255,215,80,0)");
+          ctx.beginPath(); ctx.moveTo(lx, 0); ctx.lineTo(lx + 30, H * 0.65); ctx.lineTo(lx - 5, H * 0.65); ctx.closePath();
+          ctx.fillStyle = grad; ctx.fill();
         }
-
-        // Birds
-        birdsRef.current.forEach(bird => {
-          bird.x += bird.vx;
-          bird.vy = Math.sin(timeRef.current * 2 + bird.x * 0.05) * 0.3;
-          bird.y += bird.vy;
-          if (bird.x > canvas.width + 20) bird.x = -20;
-
-          ctx.beginPath();
-          ctx.strokeStyle = `rgba(200, 200, 200, 0.6)`;
-          ctx.lineWidth = 1.5;
-          ctx.moveTo(bird.x - bird.size, bird.y);
-          ctx.quadraticCurveTo(bird.x, bird.y - bird.size * 2, bird.x + bird.size, bird.y);
-          ctx.stroke();
+        trees.forEach(tr => { const sw = Math.sin(t * 0.45 + tr.x * 10) * 0.7; drawTree(tr.x * W, tr.h, tr.w, sw); });
+        birds.forEach(b => {
+          b.x += b.vx; if (b.x > W + 15) b.x = -15;
+          const flap = Math.sin(t * 8 + b.x * 0.1) * b.sz;
+          ctx.beginPath(); ctx.moveTo(b.x - b.sz * 1.5, b.y + flap);
+          ctx.quadraticCurveTo(b.x, b.y - b.sz * 1.5, b.x + b.sz * 1.5, b.y + flap);
+          ctx.strokeStyle = "rgba(210,210,200,.65)"; ctx.lineWidth = 1.2; ctx.stroke();
         });
       }
       animRef.current = requestAnimationFrame(draw);
@@ -378,131 +357,237 @@ function ForestCanvas({ playing }: { playing: boolean }) {
     draw();
     return () => cancelAnimationFrame(animRef.current);
   }, [playing]);
-
   return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
 }
 
+// 5. FIRE — Doom cellular automaton: black → deep red → orange → yellow → white
 function FireCanvas({ playing }: { playing: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number>(0);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const canvas = canvasRef.current; if (!canvas) return;
+    const CELL = 3;
+    const fW = canvas.offsetWidth, fH = canvas.offsetHeight;
+    canvas.width = fW; canvas.height = fH;
     const ctx = canvas.getContext("2d")!;
-    const W = canvas.offsetWidth;
-    const H = canvas.offsetHeight;
-    canvas.width = W;
-    canvas.height = H;
+    const fCols = Math.ceil(fW / CELL), fRows = Math.ceil(fH / CELL);
+    let fire = new Uint8Array(fCols * fRows);
+    const imgD = ctx.createImageData(fCols, fRows);
 
-    const cols = Math.floor(W / 4);
-    let fire = new Float32Array(cols * Math.floor(H / 4));
-    const rows = Math.floor(H / 4);
+    // 256-step palette: black → deep red → orange → bright yellow → white core
+    const PAL = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let r = 0, g = 0, b = 0;
+      if (i < 40) { r = Math.round(i * 4); }
+      else if (i < 80) { const t = (i - 40) / 40; r = Math.round(160 + t * 55); g = Math.round(t * 15); }
+      else if (i < 140) { const t = (i - 80) / 60; r = 215; g = Math.round(15 + t * 100); }
+      else if (i < 200) { const t = (i - 140) / 60; r = 225 + Math.round(t * 30); g = Math.round(115 + t * 110); }
+      else { const t = (i - 200) / 55; r = 255; g = 225; b = Math.round(t * 255); }
+      PAL[i] = (255 << 24) | (b << 16) | (g << 8) | r;
+    }
+    PAL[0] = 0;
+
+    const tmp = document.createElement("canvas"); tmp.width = fCols; tmp.height = fRows;
+    const tc = tmp.getContext("2d")!;
 
     const draw = () => {
       if (playing) {
-        // Seed bottom row
-        for (let x = 0; x < cols; x++) {
-          fire[(rows - 1) * cols + x] = Math.random() > 0.1 ? 1.0 : 0;
+        // Seed bottom row with bright ember values
+        const bot = fRows - 1;
+        for (let x = 0; x < fCols; x++) {
+          fire[bot * fCols + x] = Math.random() < 0.88 ? 195 + Math.floor(Math.random() * 60) : Math.floor(Math.random() * 60);
         }
-
-        // Propagate upward
-        for (let y = 0; y < rows - 1; y++) {
-          for (let x = 0; x < cols; x++) {
-            const below = fire[(y + 1) * cols + x];
-            const bl = fire[(y + 1) * cols + Math.max(0, x - 1)];
-            const br = fire[(y + 1) * cols + Math.min(cols - 1, x + 1)];
-            fire[y * cols + x] = (below + bl + br) / 3.05;
+        // Diffuse upward with decay and subtle left drift (simulates convection)
+        for (let y = 0; y < fRows - 1; y++) {
+          for (let x = 0; x < fCols; x++) {
+            const b = fire[(y + 1) * fCols + x];
+            const bl = fire[(y + 1) * fCols + Math.max(0, x - 1)];
+            const br = fire[(y + 1) * fCols + Math.min(fCols - 1, x + 1)];
+            const bb = y + 2 < fRows ? fire[(y + 2) * fCols + x] : b;
+            const avg = (b * 2 + bl + br + bb) / 5;
+            const drift = Math.random() < 0.38 ? -1 : 0;
+            const tx = Math.max(0, Math.min(fCols - 1, x + drift));
+            fire[y * fCols + tx] = Math.max(0, Math.round(avg) - (1 + (Math.random() < 0.45 ? 1 : 0)));
           }
         }
-
-        const imgData = ctx.createImageData(cols, rows);
-        for (let i = 0; i < cols * rows; i++) {
-          const v = fire[i];
-          const r = Math.min(255, v * 500);
-          const g = Math.min(255, v * 200);
-          const b = Math.min(255, v * 50);
-          imgData.data[i * 4] = r;
-          imgData.data[i * 4 + 1] = g;
-          imgData.data[i * 4 + 2] = b;
-          imgData.data[i * 4 + 3] = v > 0.01 ? 255 : 0;
-        }
-
-        // Scale up
-        const tmp = document.createElement("canvas");
-        tmp.width = cols;
-        tmp.height = rows;
-        tmp.getContext("2d")!.putImageData(imgData, 0, 0);
-        ctx.clearRect(0, 0, W, H);
-        ctx.drawImage(tmp, 0, 0, W, H);
+        const buf = new Uint32Array(imgD.data.buffer);
+        for (let i = 0; i < fCols * fRows; i++) buf[i] = PAL[fire[i]];
+        tc.putImageData(imgD, 0, 0);
+        ctx.clearRect(0, 0, fW, fH);
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(tmp, 0, 0, fW, fH);
       } else {
-        ctx.clearRect(0, 0, W, H);
-        fire = new Float32Array(cols * rows);
+        ctx.clearRect(0, 0, fW, fH);
+        fire.fill(0);
       }
       animRef.current = requestAnimationFrame(draw);
     };
     draw();
     return () => cancelAnimationFrame(animRef.current);
   }, [playing]);
-
   return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" style={{ imageRendering: "pixelated" }} />;
 }
 
+// 6. TIBETAN BOWL — physics-accurate radiating pulse rings from center
+function BowlCanvas({ playing }: { playing: boolean }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const animRef = useRef<number>(0);
+
+  useEffect(() => {
+    const canvas = canvasRef.current; if (!canvas) return;
+    const ctx = canvas.getContext("2d")!;
+    canvas.width = canvas.offsetWidth; canvas.height = canvas.offsetHeight;
+    const W = canvas.width, H = canvas.height;
+    const cx = W / 2, cy = H / 2;
+    const RINGS = 7;
+    let t = 0;
+
+    const draw = () => {
+      ctx.clearRect(0, 0, W, H);
+      if (playing) {
+        t += 0.012;
+        for (let i = 0; i < RINGS; i++) {
+          const phase = t - i * 0.28;
+          const r = Math.max(1, 12 + i * 16 + Math.sin(phase) * 4);
+          const alpha = (0.55 - i * 0.065) * (0.5 + 0.5 * Math.sin(phase + Math.PI * 0.5));
+          const g = 255 - Math.floor(i * 20);
+          ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(${g},${Math.floor(g * 0.75)},${Math.floor(g * 0.2)},${alpha})`;
+          ctx.lineWidth = 1.5 - i * 0.12; ctx.stroke();
+        }
+        const inner = 8 + Math.sin(t) * 2.5;
+        ctx.beginPath(); ctx.arc(cx, cy, inner, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255,210,80,${0.4 + Math.sin(t) * 0.15})`; ctx.fill();
+      }
+      animRef.current = requestAnimationFrame(draw);
+    };
+    draw();
+    return () => cancelAnimationFrame(animRef.current);
+  }, [playing]);
+  return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
+}
+
+// 7. WHITE NOISE — live oscilloscope ring-buffer waveform
+function NoiseCanvas({ playing }: { playing: boolean }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const animRef = useRef<number>(0);
+
+  useEffect(() => {
+    const canvas = canvasRef.current; if (!canvas) return;
+    const ctx = canvas.getContext("2d")!;
+    canvas.width = canvas.offsetWidth; canvas.height = canvas.offsetHeight;
+    const W = canvas.width, H = canvas.height;
+    const BUF = 180; const history = new Float32Array(BUF); let head = 0; let t = 0;
+
+    const draw = () => {
+      ctx.clearRect(0, 0, W, H);
+      if (playing) {
+        t += 0.04;
+        const val = (Math.random() * 2 - 1) * 0.85 + Math.sin(t * 7.3) * Math.random() * 0.3;
+        history[head % BUF] = val; head++;
+        ctx.beginPath();
+        for (let i = 0; i < BUF; i++) {
+          const idx = (head - BUF + i + BUF * 10) % BUF;
+          const x = (i / BUF) * W, y = H / 2 + history[idx] * (H * 0.38);
+          i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = "rgba(180,200,255,.65)"; ctx.lineWidth = 1.2; ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, H / 2); ctx.lineTo(W, H / 2);
+        ctx.strokeStyle = "rgba(255,255,255,.06)"; ctx.lineWidth = 0.5; ctx.stroke();
+      }
+      animRef.current = requestAnimationFrame(draw);
+    };
+    draw();
+    return () => cancelAnimationFrame(animRef.current);
+  }, [playing]);
+  return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
+}
+
+// 8. BROWN NOISE — Brownian motion waveform + deep rolling sine underlayers
+function BrownCanvas({ playing }: { playing: boolean }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const animRef = useRef<number>(0);
+
+  useEffect(() => {
+    const canvas = canvasRef.current; if (!canvas) return;
+    const ctx = canvas.getContext("2d")!;
+    canvas.width = canvas.offsetWidth; canvas.height = canvas.offsetHeight;
+    const W = canvas.width, H = canvas.height;
+    const BUF = 180; const history = new Float32Array(BUF); let head = 0, lastOut = 0, t = 0;
+
+    const draw = () => {
+      ctx.clearRect(0, 0, W, H);
+      if (playing) {
+        t += 0.025;
+        const w = Math.random() * 2 - 1;
+        lastOut = (lastOut + 0.02 * w) / 1.02;
+        history[head % BUF] = Math.max(-1, Math.min(1, lastOut * 3.5)); head++;
+        ctx.beginPath();
+        for (let i = 0; i < BUF; i++) {
+          const idx = (head - BUF + i + BUF * 10) % BUF;
+          const x = (i / BUF) * W, y = H / 2 + history[idx] * (H * 0.42);
+          i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        }
+        const grad = ctx.createLinearGradient(0, 0, W, 0);
+        grad.addColorStop(0, "rgba(160,90,20,0)"); grad.addColorStop(0.5, "rgba(180,105,25,.7)"); grad.addColorStop(1, "rgba(160,90,20,0)");
+        ctx.strokeStyle = grad; ctx.lineWidth = 2.2; ctx.stroke();
+        for (let l = 0; l < 3; l++) {
+          ctx.beginPath();
+          for (let x = 0; x <= W; x += 4) {
+            const y = H / 2 + Math.sin(x * 0.008 + l * 0.7 + t * (l + 1) * 0.4) * (H * 0.12 + l * 8);
+            x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+          }
+          ctx.strokeStyle = `rgba(140,80,15,${0.12 - l * 0.03})`; ctx.lineWidth = 1; ctx.stroke();
+        }
+      }
+      animRef.current = requestAnimationFrame(draw);
+    };
+    draw();
+    return () => cancelAnimationFrame(animRef.current);
+  }, [playing]);
+  return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
+}
+
+// 9. AUTUMN WIND — bezier leaf shapes with midrib vein + wobble physics + tumbling rotation
 function AutumnCanvas({ playing }: { playing: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number>(0);
-  const leavesRef = useRef<{ x: number; y: number; vx: number; vy: number; rotation: number; vr: number; size: number; color: string; wobble: number }[]>([]);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const canvas = canvasRef.current; if (!canvas) return;
     const ctx = canvas.getContext("2d")!;
-    canvas.width = canvas.offsetWidth;
-    canvas.height = canvas.offsetHeight;
-
-    const colors = ["#c0392b", "#e67e22", "#f39c12", "#d35400", "#922b21", "#ca6f1e"];
-    leavesRef.current = Array.from({ length: 40 }, () => ({
-      x: Math.random() * canvas.width,
-      y: Math.random() * canvas.height,
-      vx: (Math.random() - 0.5) * 1.5,
-      vy: 0.5 + Math.random() * 1.5,
-      rotation: Math.random() * Math.PI * 2,
-      vr: (Math.random() - 0.5) * 0.05,
-      size: 6 + Math.random() * 10,
-      color: colors[Math.floor(Math.random() * colors.length)],
-      wobble: Math.random() * Math.PI * 2,
+    canvas.width = canvas.offsetWidth; canvas.height = canvas.offsetHeight;
+    const W = canvas.width, H = canvas.height;
+    const COLORS = ["#c0392b", "#e67e22", "#f0a500", "#d35400", "#a93226", "#ca6f1e", "#e74c3c"];
+    const leaves = Array.from({ length: 38 }, () => ({
+      x: Math.random() * W, y: Math.random() * H,
+      vx: (Math.random() - 0.5) * 1.2, vy: 0.6 + Math.random() * 1.4,
+      rot: Math.random() * Math.PI * 2, vr: (Math.random() - 0.5) * 0.04,
+      sz: 5 + Math.random() * 9, col: COLORS[Math.floor(Math.random() * COLORS.length)],
+      wob: Math.random() * Math.PI * 2, wobSpd: 0.015 + Math.random() * 0.02,
     }));
 
-    const drawLeaf = (x: number, y: number, size: number, rotation: number, color: string) => {
-      ctx.save();
-      ctx.translate(x, y);
-      ctx.rotate(rotation);
+    function drawLeaf(x: number, y: number, sz: number, rot: number, col: string) {
+      ctx.save(); ctx.translate(x, y); ctx.rotate(rot);
       ctx.beginPath();
-      ctx.moveTo(0, -size);
-      ctx.bezierCurveTo(size * 0.8, -size * 0.5, size * 0.8, size * 0.5, 0, size);
-      ctx.bezierCurveTo(-size * 0.8, size * 0.5, -size * 0.8, -size * 0.5, 0, -size);
-      ctx.fillStyle = color;
-      ctx.globalAlpha = 0.7;
-      ctx.fill();
-      ctx.globalAlpha = 1;
+      ctx.moveTo(0, -sz);
+      ctx.bezierCurveTo(sz * 0.9, -sz * 0.55, sz * 0.85, sz * 0.45, 0, sz);
+      ctx.bezierCurveTo(-sz * 0.85, sz * 0.45, -sz * 0.9, -sz * 0.55, 0, -sz);
+      ctx.fillStyle = col; ctx.globalAlpha = 0.75; ctx.fill();
+      ctx.beginPath(); ctx.moveTo(0, -sz); ctx.lineTo(0, sz);
+      ctx.strokeStyle = "rgba(0,0,0,.15)"; ctx.lineWidth = 0.5; ctx.globalAlpha = 0.5; ctx.stroke();
       ctx.restore();
-    };
+    }
 
     const draw = () => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.clearRect(0, 0, W, H);
       if (playing) {
-        leavesRef.current.forEach(leaf => {
-          leaf.wobble += 0.02;
-          leaf.x += leaf.vx + Math.sin(leaf.wobble) * 0.5;
-          leaf.y += leaf.vy;
-          leaf.rotation += leaf.vr;
-
-          if (leaf.y > canvas.height + 20) {
-            leaf.y = -20;
-            leaf.x = Math.random() * canvas.width;
-          }
-
-          drawLeaf(leaf.x, leaf.y, leaf.size, leaf.rotation, leaf.color);
+        leaves.forEach(l => {
+          l.wob += l.wobSpd; l.x += l.vx + Math.sin(l.wob) * 0.55; l.y += l.vy; l.rot += l.vr;
+          if (l.y > H + 15) { l.y = -15; l.x = Math.random() * W; }
+          if (l.x < -15 || l.x > W + 15) { l.x = Math.random() * W; l.y = -15; }
+          drawLeaf(l.x, l.y, l.sz, l.rot, l.col);
         });
       }
       animRef.current = requestAnimationFrame(draw);
@@ -510,154 +595,66 @@ function AutumnCanvas({ playing }: { playing: boolean }) {
     draw();
     return () => cancelAnimationFrame(animRef.current);
   }, [playing]);
-
   return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
 }
 
-function BowlCanvas({ playing }: { playing: boolean }) {
-  return (
-    <div className="absolute inset-0 flex items-center justify-center">
-      {[1, 1.6, 2.2, 2.8, 3.4].map((scale, i) => (
-        <motion.div
-          key={i}
-          className="absolute rounded-full border border-amber-400/20"
-          style={{ width: 60 * scale, height: 60 * scale }}
-          animate={playing ? {
-            scale: [scale, scale * 1.12, scale],
-            opacity: [0.4 - i * 0.06, 0.15, 0.4 - i * 0.06],
-          } : { opacity: 0.05 }}
-          transition={{ duration: 10, repeat: Infinity, delay: i * 0.8, ease: "easeInOut" }}
-        />
-      ))}
-      <motion.div
-        animate={playing ? { scale: [1, 1.1, 1], opacity: [0.8, 1, 0.8] } : { opacity: 0.2 }}
-        transition={{ duration: 10, repeat: Infinity, ease: "easeInOut" }}
-        className="w-14 h-14 rounded-full bg-amber-400/30 border-2 border-amber-400/50"
-      />
-    </div>
-  );
-}
-
-function NoiseCanvas({ playing }: { playing: boolean }) {
-  return (
-    <div className="absolute inset-0 flex items-center justify-center">
-      <div className="flex items-center gap-0.5">
-        {[...Array(40)].map((_, i) => (
-          <motion.div
-            key={i}
-            className="w-1 rounded-full bg-white/30"
-            animate={playing ? {
-              height: [4 + Math.random() * 20, 4 + Math.random() * 40, 4 + Math.random() * 15],
-              opacity: [0.2, 0.6, 0.3],
-            } : { height: 4, opacity: 0.1 }}
-            transition={{
-              duration: 0.1 + Math.random() * 0.15,
-              repeat: Infinity,
-              delay: i * 0.008,
-              ease: "linear",
-            }}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function BrownCanvas({ playing }: { playing: boolean }) {
-  return (
-    <div className="absolute inset-0 flex items-center justify-center">
-      <div className="flex items-center gap-1">
-        {[...Array(20)].map((_, i) => (
-          <motion.div
-            key={i}
-            className="w-2 rounded-full bg-amber-800/50"
-            animate={playing ? {
-              height: [8 + Math.random() * 30, 8 + Math.random() * 60, 8 + Math.random() * 20],
-              opacity: [0.3, 0.7, 0.4],
-            } : { height: 8, opacity: 0.1 }}
-            transition={{
-              duration: 0.3 + Math.random() * 0.4,
-              repeat: Infinity,
-              delay: i * 0.05,
-              ease: "easeInOut",
-            }}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
+// 10. DEEP WIND — horizontal sinusoidal streaks + speed variation + drifting dust motes
 function WindCanvas({ playing }: { playing: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number>(0);
-  const timeRef = useRef(0);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const canvas = canvasRef.current; if (!canvas) return;
     const ctx = canvas.getContext("2d")!;
-    canvas.width = canvas.offsetWidth;
-    canvas.height = canvas.offsetHeight;
+    canvas.width = canvas.offsetWidth; canvas.height = canvas.offsetHeight;
+    const W = canvas.width, H = canvas.height;
+    let t = 0;
+    const dust = Array.from({ length: 55 }, () => ({ x: Math.random() * W, y: Math.random() * H, spd: 1.5 + Math.random() * 4, alpha: 0.12 + Math.random() * 0.3, r: 0.5 + Math.random() * 1.5 }));
 
     const draw = () => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.clearRect(0, 0, W, H);
       if (playing) {
-        timeRef.current += 0.008;
-        const t = timeRef.current;
-        const w = canvas.width;
-        const h = canvas.height;
-
-        for (let i = 0; i < 8; i++) {
-          const y = h * 0.2 + i * h * 0.08;
-          const speed = 0.5 + i * 0.15;
-          const amp = 8 + i * 3;
-          const alpha = 0.06 - i * 0.005;
-          const len = w * (0.4 + Math.sin(t * 0.3 + i) * 0.3);
-          const startX = (t * speed * 50 + i * 100) % (w + 200) - 100;
-
-          ctx.beginPath();
-          ctx.moveTo(startX, y);
-          for (let x = startX; x < startX + len; x += 3) {
-            const yOff = Math.sin(x * 0.02 + t * speed) * amp;
-            ctx.lineTo(x, y + yOff);
-          }
-          ctx.strokeStyle = `rgba(200, 220, 255, ${alpha})`;
-          ctx.lineWidth = 1.5 + i * 0.3;
-          ctx.stroke();
+        t += 0.007;
+        for (let i = 0; i < 9; i++) {
+          const y = H * (0.08 + i * 0.1);
+          const spd = 0.4 + i * 0.12, amp = 5 + i * 2.5, alpha = 0.055 - i * 0.004;
+          const len = W * (0.35 + Math.sin(t * 0.25 + i) * 0.3);
+          const sx = ((t * spd * 55 + i * 120) % (W + 250)) - 100;
+          ctx.beginPath(); ctx.moveTo(sx, y);
+          for (let x = sx; x < sx + len; x += 4) ctx.lineTo(x, y + Math.sin(x * 0.018 + t * spd) * amp);
+          ctx.strokeStyle = `rgba(195,215,255,${alpha})`; ctx.lineWidth = 1 + i * 0.2; ctx.stroke();
         }
+        dust.forEach(d => {
+          d.x += d.spd;
+          if (d.x > W + 5) { d.x = -5; d.y = Math.random() * H; }
+          ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(220,225,255,${d.alpha})`; ctx.fill();
+        });
       }
       animRef.current = requestAnimationFrame(draw);
     };
     draw();
     return () => cancelAnimationFrame(animRef.current);
   }, [playing]);
-
   return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
 }
 
 function getVisualizer(id: SoundId, isPlaying: boolean) {
   switch (id) {
-    case "rain": return <RainCanvas playing={isPlaying} />;
+    case "rain":    return <RainCanvas playing={isPlaying} />;
     case "thunder": return <ThunderCanvas playing={isPlaying} />;
-    case "ocean": return <OceanCanvas playing={isPlaying} />;
-    case "forest": return <ForestCanvas playing={isPlaying} />;
-    case "bowl": return <BowlCanvas playing={isPlaying} />;
-    case "noise": return <NoiseCanvas playing={isPlaying} />;
-    case "brown": return <BrownCanvas playing={isPlaying} />;
-    case "fire": return <FireCanvas playing={isPlaying} />;
-    case "autumn": return <AutumnCanvas playing={isPlaying} />;
-    case "wind": return <WindCanvas playing={isPlaying} />;
+    case "ocean":   return <OceanCanvas playing={isPlaying} />;
+    case "forest":  return <ForestCanvas playing={isPlaying} />;
+    case "bowl":    return <BowlCanvas playing={isPlaying} />;
+    case "noise":   return <NoiseCanvas playing={isPlaying} />;
+    case "brown":   return <BrownCanvas playing={isPlaying} />;
+    case "fire":    return <FireCanvas playing={isPlaying} />;
+    case "autumn":  return <AutumnCanvas playing={isPlaying} />;
+    case "wind":    return <WindCanvas playing={isPlaying} />;
   }
 }
 
-const POST_FEELINGS = [
-  { label: "Calmer", emoji: "🌿" },
-  { label: "Lighter", emoji: "☁️" },
-  { label: "Still heavy", emoji: "💙" },
-  { label: "Grateful", emoji: "💚" },
-  { label: "Tired", emoji: "🌙" },
-];
+// ── PAGE COMPONENT ──────────────────────────────────────────────────────────
 
 export default function AudioCalm() {
   const [selected, setSelected] = useState<SoundId | null>(null);
@@ -715,13 +712,7 @@ export default function AudioCalm() {
       <div className="flex flex-col min-h-[100dvh] relative overflow-hidden bg-[#0a0a0f]">
         <AnimatePresence mode="wait">
           {!showDetail ? (
-            <motion.div
-              key="picker"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="flex flex-col min-h-[100dvh]"
-            >
+            <motion.div key="picker" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex flex-col min-h-[100dvh]">
               <div className="absolute inset-0 bg-gradient-to-b from-slate-900 to-black" />
               <div className="relative z-10 flex flex-col min-h-[100dvh] px-6 pt-16 pb-10">
                 <div className="flex items-center justify-between mb-8">
@@ -729,25 +720,16 @@ export default function AudioCalm() {
                     <p className="text-white/50 text-xs font-semibold uppercase tracking-widest mb-1">Sound Bath</p>
                     <h1 className="text-3xl font-serif text-white">Choose your calm.</h1>
                   </div>
-                  <button
-                    onClick={() => setLocation("/")}
-                    className="w-10 h-10 rounded-full bg-white/10 flex items-center justify-center text-white/70 hover:text-white"
-                  >
+                  <button onClick={() => setLocation("/")} className="w-10 h-10 rounded-full bg-white/10 flex items-center justify-center text-white/70 hover:text-white">
                     <X className="w-5 h-5" />
                   </button>
                 </div>
-
                 <div className="flex flex-col gap-3 flex-1">
                   {SOUNDS.map((sound, i) => (
-                    <motion.button
-                      key={sound.id}
-                      initial={{ opacity: 0, y: 20 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ delay: i * 0.05 }}
+                    <motion.button key={sound.id} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.05 }}
                       onClick={() => handleSelect(sound.id)}
                       className={`relative overflow-hidden rounded-2xl text-left bg-gradient-to-r ${sound.color} border border-white/5`}
-                      style={{ height: 72 }}
-                    >
+                      style={{ height: 72 }}>
                       <div className="relative z-10 flex items-center justify-between px-5 h-full">
                         <div>
                           <p className="text-white/50 text-[10px] font-semibold uppercase tracking-widest">{sound.label}</p>
@@ -764,31 +746,20 @@ export default function AudioCalm() {
               </div>
             </motion.div>
           ) : (
-            <motion.div
-              key="player"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="flex flex-col min-h-[100dvh]"
-            >
+            <motion.div key="player" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex flex-col min-h-[100dvh]">
               {currentSound && (
                 <>
                   <div className={`absolute inset-0 bg-gradient-to-b ${currentSound.color}`} />
                   <div className="absolute inset-0">{getVisualizer(currentSound.id, isPlaying)}</div>
                   <div className="absolute inset-0 bg-black/30" />
-
                   <div className="relative z-10 flex flex-col min-h-[100dvh] px-6 pt-14 pb-10">
                     <div className="flex items-center justify-between">
-                      <button
-                        onClick={handleBack}
-                        className="flex items-center gap-1.5 text-white/60 hover:text-white"
-                      >
+                      <button onClick={handleBack} className="flex items-center gap-1.5 text-white/60 hover:text-white">
                         <ChevronLeft className="w-5 h-5" />
                         <span className="text-sm">All sounds</span>
                       </button>
                       <p className="text-white/50 text-sm font-mono">{formatTime(elapsed)}</p>
                     </div>
-
                     <div className="flex-1 flex flex-col items-center justify-center gap-6">
                       <div className="text-center">
                         <p className="text-white/40 text-xs font-semibold uppercase tracking-widest mb-1">{currentSound.label}</p>
@@ -796,32 +767,14 @@ export default function AudioCalm() {
                         <p className="text-white/60 text-sm max-w-xs">{currentSound.desc}</p>
                       </div>
                     </div>
-
                     <div className="flex flex-col gap-4">
                       <div className="flex items-center gap-3">
                         <Volume2 className="w-4 h-4 text-white/40 shrink-0" />
-                        <input
-                          type="range"
-                          min="0"
-                          max="1"
-                          step="0.01"
-                          value={volume}
-                          onChange={(e) => setVolume(parseFloat(e.target.value))}
-                          className="flex-1 accent-white h-1"
-                        />
+                        <input type="range" min="0" max="1" step="0.01" value={volume} onChange={(e) => setVolume(parseFloat(e.target.value))} className="flex-1 accent-white h-1" />
                       </div>
-
-                      <button
-                        onClick={handleTogglePlay}
-                        className="w-full py-4 rounded-2xl font-semibold text-lg border border-white/30 bg-white/10 backdrop-blur-sm text-white flex items-center justify-center gap-3 hover:bg-white/20 transition-colors"
-                      >
-                        {isPlaying ? (
-                          <><Pause className="w-5 h-5" /> Pause</>
-                        ) : (
-                          <><Play className="w-5 h-5 ml-0.5" /> Resume</>
-                        )}
+                      <button onClick={handleTogglePlay} className="w-full py-4 rounded-2xl font-semibold text-lg border border-white/30 bg-white/10 backdrop-blur-sm text-white flex items-center justify-center gap-3 hover:bg-white/20 transition-colors">
+                        {isPlaying ? (<><Pause className="w-5 h-5" /> Pause</>) : (<><Play className="w-5 h-5 ml-0.5" /> Resume</>)}
                       </button>
-
                       <div className="bg-white/5 border border-white/10 rounded-2xl p-4">
                         <p className="text-white/40 text-xs font-semibold uppercase tracking-widest mb-2">Why it works</p>
                         <p className="text-white/70 text-sm leading-relaxed">{currentSound.science}</p>
