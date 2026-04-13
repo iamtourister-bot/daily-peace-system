@@ -36,7 +36,7 @@ const MEDITATIONS: Meditation[] = [
     tag: "Morning",
     intro: "A gentle way to open the day. Let the night release from your body.",
     steps: [
-      { text: "Get comfortable. Close your eyes when you are ready. This will begin in a moment.", duration: 5000 },
+      { text: "Get comfortable. Clear your mind and follow each instruction as it appears.", duration: 5000 },
       { text: "Take a slow breath in... and let it go.", duration: 10000 },
       { text: "Notice your body. Just observe.", duration: 12000 },
       { text: "Think of one thing you are stepping into today.", duration: 12000 },
@@ -53,7 +53,7 @@ const MEDITATIONS: Meditation[] = [
     tag: "Anxiety",
     intro: "When your mind is racing, this session helps you return to your body.",
     steps: [
-      { text: "Get comfortable. Close your eyes when you are ready. This will begin in a moment.", duration: 5000 },
+      { text: "Get comfortable. Clear your mind and follow each instruction as it appears.", duration: 5000 },
       { text: "Place both feet on the floor. Feel the ground holding you.", duration: 12000 },
       { text: "Place one hand on your chest. Feel it rise and fall.", duration: 12000 },
       { text: "Breathe in for 4... hold for 2... out for 6.", duration: 16000 },
@@ -71,7 +71,7 @@ const MEDITATIONS: Meditation[] = [
     tag: "Night",
     intro: "Your body knows how to sleep. This helps your mind step aside.",
     steps: [
-      { text: "Lie down. Close your eyes. The day is done.", duration: 5000 },
+      { text: "Lie down and get still. The day is done.", duration: 5000 },
       { text: "Let your toes go. Release them.", duration: 12000 },
       { text: "Your legs... heavy and soft.", duration: 12000 },
       { text: "Your back... your belly... sinking down.", duration: 14000 },
