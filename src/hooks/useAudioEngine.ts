@@ -52,9 +52,9 @@ export function useAudioEngine() {
   const [playing, setPlaying] = useState<SoundId | null>(null);
   const [volume, setVolumeState] = useState(0.7);
 
-  const getCtx = () => {
+ const getCtx = () => {
     if (!ctxRef.current || ctxRef.current.state === "closed") {
-      ctxRef.current = new AudioContext();
+      ctxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
     }
     if (ctxRef.current.state === "suspended") {
       ctxRef.current.resume();
