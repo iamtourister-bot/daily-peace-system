@@ -233,69 +233,133 @@ function OceanCanvas({ playing }: { playing: boolean }) {
   useEffect(() => {
     const canvas = canvasRef.current; if (!canvas) return;
     const ctx = canvas.getContext("2d")!;
-    canvas.width = canvas.offsetWidth; canvas.height = canvas.offsetHeight;
-    const W = canvas.width, H = canvas.height;
+    const W = canvas.offsetWidth, H = canvas.offsetHeight;
+    canvas.width = W; canvas.height = H;
     let t = 0;
 
-    // Spray mist particles that ride wave crests
-    const spray: { x: number; y: number; vx: number; vy: number; life: number; r: number }[] = [];
-    for (let i = 0; i < 40; i++) {
-      spray.push({ x: Math.random() * W, y: H * 0.3 + Math.random() * H * 0.3, vx: (Math.random() - 0.5) * 0.5, vy: -Math.random() * 0.4, life: Math.random(), r: 0.5 + Math.random() * 1.5 });
+    const foam: { x: number; y: number; vx: number; vy: number; life: number; r: number }[] = [];
+    for (let i = 0; i < 35; i++) {
+      foam.push({
+        x: Math.random() * W,
+        y: H * 0.45 + Math.random() * H * 0.2,
+        vx: (Math.random() - 0.5) * 0.4,
+        vy: -Math.random() * 0.2,
+        life: Math.random(),
+        r: 0.8 + Math.random() * 2,
+      });
     }
-
-    // 5 wave layers — deeper layers are slower, darker, more transparent
-    const layers = [
-      { yFrac: 0.28, amp: 16, freq: 0.011, spd: 1.0, color: "90,165,215", alpha: 0.22 },
-      { yFrac: 0.40, amp: 11, freq: 0.015, spd: 0.75, color: "70,145,200", alpha: 0.18 },
-      { yFrac: 0.50, amp: 8, freq: 0.019, spd: 0.58, color: "50,125,188", alpha: 0.14 },
-      { yFrac: 0.59, amp: 5, freq: 0.024, spd: 0.42, color: "35,108,175", alpha: 0.11 },
-      { yFrac: 0.67, amp: 3, freq: 0.030, spd: 0.28, color: "25,90,160", alpha: 0.08 },
-    ];
 
     const draw = () => {
       ctx.clearRect(0, 0, W, H);
       if (playing) {
-        t += 0.007;
+        t += 0.006;
 
-        // Horizon shimmer
-        ctx.fillStyle = "rgba(30,80,140,0.04)";
-        ctx.fillRect(0, 0, W, H * 0.25);
+        // Sky
+        const skyGrad = ctx.createLinearGradient(0, 0, 0, H * 0.42);
+        skyGrad.addColorStop(0, "#04080f");
+        skyGrad.addColorStop(0.5, "#060d1a");
+        skyGrad.addColorStop(1, "#0a1628");
+        ctx.fillStyle = skyGrad;
+        ctx.fillRect(0, 0, W, H * 0.42);
+
+        // Stars
+        for (let i = 0; i < 60; i++) {
+          const sx = ((i * 131.7) % W);
+          const sy = ((i * 73.1) % (H * 0.38));
+          const tw = 0.2 + 0.6 * Math.abs(Math.sin(t * 0.5 + i * 0.7));
+          ctx.beginPath();
+          ctx.arc(sx, sy, 0.7, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(255,255,240,${tw})`;
+          ctx.fill();
+        }
+
+        // Moon
+        const moonX = W * 0.75, moonY = H * 0.12;
+        const moonGlow = ctx.createRadialGradient(moonX, moonY, 5, moonX, moonY, 45);
+        moonGlow.addColorStop(0, "rgba(255,245,200,0.12)");
+        moonGlow.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.fillStyle = moonGlow;
+        ctx.beginPath(); ctx.arc(moonX, moonY, 45, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(moonX, moonY, 14, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(255,248,210,0.92)"; ctx.fill();
+
+        // Moon reflection on water
+        const reflGrad = ctx.createLinearGradient(moonX, H * 0.42, moonX, H);
+        reflGrad.addColorStop(0, "rgba(255,248,200,0.12)");
+        reflGrad.addColorStop(0.3, "rgba(255,248,200,0.06)");
+        reflGrad.addColorStop(1, "rgba(255,248,200,0)");
+        ctx.fillStyle = reflGrad;
+        for (let row = 0; row < 18; row++) {
+          const ry = H * 0.42 + row * (H * 0.58 / 18);
+          const rw = 12 + row * 3 + Math.sin(t * 2 + row) * 4;
+          const rx = moonX + Math.sin(t * 1.5 + row * 0.4) * (row * 1.5);
+          ctx.fillStyle = `rgba(255,248,200,${0.08 - row * 0.004})`;
+          ctx.beginPath();
+          ctx.ellipse(rx, ry, rw, 1.5, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // Horizon glow
+        const horizGrad = ctx.createLinearGradient(0, H * 0.38, 0, H * 0.48);
+        horizGrad.addColorStop(0, "rgba(20,50,100,0.5)");
+        horizGrad.addColorStop(1, "rgba(10,30,70,0)");
+        ctx.fillStyle = horizGrad;
+        ctx.fillRect(0, H * 0.38, W, H * 0.1);
+
+        // Ocean water body
+        const waterGrad = ctx.createLinearGradient(0, H * 0.42, 0, H);
+        waterGrad.addColorStop(0, "#0a2040");
+        waterGrad.addColorStop(0.3, "#071830");
+        waterGrad.addColorStop(1, "#040f1e");
+        ctx.fillStyle = waterGrad;
+        ctx.fillRect(0, H * 0.42, W, H * 0.58);
+
+        // 5 wave layers
+        const layers = [
+          { yF: 0.42, amp: 14, fq: 0.012, spd: 1.0, colR: 25, colG: 80, colB: 140, a: 0.55 },
+          { yF: 0.52, amp: 9, fq: 0.016, spd: 0.72, colR: 18, colG: 65, colB: 120, a: 0.45 },
+          { yF: 0.61, amp: 6, fq: 0.021, spd: 0.52, colR: 12, colG: 50, colB: 100, a: 0.35 },
+          { yF: 0.70, amp: 4, fq: 0.027, spd: 0.38, colR: 8, colG: 38, colB: 80, a: 0.25 },
+          { yF: 0.78, amp: 2, fq: 0.034, spd: 0.22, colR: 5, colG: 28, colB: 60, a: 0.18 },
+        ];
 
         layers.forEach((l, li) => {
-          const yBase = H * l.yFrac;
-          // Fill wave body
+          const yBase = H * l.yF;
           ctx.beginPath(); ctx.moveTo(0, yBase);
           for (let x = 0; x <= W; x += 3) {
             const y = yBase
-              + Math.sin(x * l.freq + t * l.spd) * l.amp
-              + Math.sin(x * l.freq * 0.55 + t * l.spd * 0.7 + li) * l.amp * 0.45
-              + Math.sin(x * l.freq * 1.8 + t * l.spd * 1.4) * l.amp * 0.15;
+              + Math.sin(x * l.fq + t * l.spd) * l.amp
+              + Math.sin(x * l.fq * 0.6 + t * l.spd * 0.65 + li) * l.amp * 0.5
+              + Math.sin(x * l.fq * 1.9 + t * l.spd * 1.5) * l.amp * 0.18;
             ctx.lineTo(x, y);
           }
           ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath();
-          ctx.fillStyle = `rgba(${l.color},${l.alpha})`; ctx.fill();
+          const wg = ctx.createLinearGradient(0, yBase - l.amp, 0, yBase + 20);
+          wg.addColorStop(0, `rgba(${l.colR + 20},${l.colG + 30},${l.colB + 40},${l.a})`);
+          wg.addColorStop(1, `rgba(${l.colR},${l.colG},${l.colB},${l.a * 0.4})`);
+          ctx.fillStyle = wg; ctx.fill();
 
-          // Wave crest highlight line
+          // Crest highlight
           ctx.beginPath(); ctx.moveTo(0, yBase);
           for (let x = 0; x <= W; x += 3) {
             const y = yBase
-              + Math.sin(x * l.freq + t * l.spd) * l.amp
-              + Math.sin(x * l.freq * 0.55 + t * l.spd * 0.7 + li) * l.amp * 0.45
-              + Math.sin(x * l.freq * 1.8 + t * l.spd * 1.4) * l.amp * 0.15;
+              + Math.sin(x * l.fq + t * l.spd) * l.amp
+              + Math.sin(x * l.fq * 0.6 + t * l.spd * 0.65 + li) * l.amp * 0.5
+              + Math.sin(x * l.fq * 1.9 + t * l.spd * 1.5) * l.amp * 0.18;
             ctx.lineTo(x, y);
           }
-          ctx.strokeStyle = `rgba(255,255,255,${l.alpha * 0.8})`; ctx.lineWidth = li === 0 ? 1.2 : 0.6; ctx.stroke();
+          ctx.strokeStyle = `rgba(255,255,255,${li === 0 ? 0.18 : 0.08})`; ctx.lineWidth = li === 0 ? 1.2 : 0.6; ctx.stroke();
         });
 
-        // Spray / foam particles
-        spray.forEach(p => {
-          p.x += p.vx; p.y += p.vy; p.life -= 0.006;
+        // Foam particles
+        foam.forEach(p => {
+          p.x += p.vx; p.y += p.vy; p.life -= 0.005;
           if (p.life <= 0) {
-            p.x = Math.random() * W; p.y = H * (0.28 + Math.random() * 0.25);
-            p.vx = (Math.random() - 0.5) * 0.5; p.vy = -Math.random() * 0.3; p.life = 0.8 + Math.random() * 0.2;
+            p.x = Math.random() * W; p.y = H * (0.42 + Math.random() * 0.2);
+            p.vx = (Math.random() - 0.5) * 0.4; p.vy = -Math.random() * 0.2; p.life = 0.7 + Math.random() * 0.3;
           }
           ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-          ctx.fillStyle = `rgba(255,255,255,${p.life * 0.45})`; ctx.fill();
+          ctx.fillStyle = `rgba(255,255,255,${p.life * 0.35})`; ctx.fill();
         });
       }
       animRef.current = requestAnimationFrame(draw);
