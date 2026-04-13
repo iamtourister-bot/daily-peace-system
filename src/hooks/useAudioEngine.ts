@@ -1,4 +1,4 @@
-import { useRef, useCallback, useState } from "react";
+import { useRef, useCallback, useState, useEffect } from "react";
 
 export type SoundId = "rain" | "ocean" | "forest" | "bowl" | "noise";
 
@@ -52,12 +52,48 @@ export function useAudioEngine() {
   const [playing, setPlaying] = useState<SoundId | null>(null);
   const [volume, setVolumeState] = useState(0.7);
 
- const getCtx = () => {
+  // Unlock AudioContext on first touch for iOS
+  useEffect(() => {
+    const unlock = async () => {
+      try {
+        if (!ctxRef.current) {
+          ctxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        }
+        if (ctxRef.current.state === "suspended") {
+          await ctxRef.current.resume();
+        }
+        // Play a silent buffer to fully unlock iOS audio
+        const buffer = ctxRef.current.createBuffer(1, 1, 22050);
+        const source = ctxRef.current.createBufferSource();
+        source.buffer = buffer;
+        source.connect(ctxRef.current.destination);
+        source.start(0);
+        source.disconnect();
+      } catch (e) {
+        // silent fail
+      }
+      document.removeEventListener("touchstart", unlock);
+      document.removeEventListener("touchend", unlock);
+      document.removeEventListener("mousedown", unlock);
+    };
+
+    document.addEventListener("touchstart", unlock, { passive: true });
+    document.addEventListener("touchend", unlock, { passive: true });
+    document.addEventListener("mousedown", unlock, { passive: true });
+
+    return () => {
+      document.removeEventListener("touchstart", unlock);
+      document.removeEventListener("touchend", unlock);
+      document.removeEventListener("mousedown", unlock);
+    };
+  }, []);
+
+  const getCtx = async (): Promise<AudioContext> => {
     if (!ctxRef.current || ctxRef.current.state === "closed") {
       ctxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
     }
     if (ctxRef.current.state === "suspended") {
-      ctxRef.current.resume();
+      await ctxRef.current.resume();
     }
     return ctxRef.current;
   };
@@ -69,9 +105,9 @@ export function useAudioEngine() {
     setPlaying(null);
   }, []);
 
-  const play = useCallback((id: SoundId) => {
+  const play = useCallback(async (id: SoundId) => {
     stop();
-    const ctx = getCtx();
+    const ctx = await getCtx();
     const master = ctx.createGain();
     master.gain.setValueAtTime(volume, ctx.currentTime);
     master.connect(ctx.destination);
