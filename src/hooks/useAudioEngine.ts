@@ -320,5 +320,11 @@ export function useAudioEngine() {
     }
   }, []);
 
-  return { playing, play, stop, volume, setVolume };
+  const resumeCtx = useCallback(async () => {
+    if (ctxRef.current && ctxRef.current.state === "suspended") {
+      await ctxRef.current.resume();
+    }
+  }, []);
+
+  return { playing, play, stop, volume, setVolume, resumeCtx };
 }
