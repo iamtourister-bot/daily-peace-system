@@ -430,34 +430,40 @@ function FireCanvas({ playing }: { playing: boolean }) {
   const animRef = useRef<number>(0);
 
   useEffect(() => {
-    const canvas = canvasRef.current; if (!canvas) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
     const ctx = canvas.getContext("2d")!;
-    const W = canvas.offsetWidth, H = canvas.offsetHeight;
-    canvas.width = W; canvas.height = H;
+    const W = canvas.offsetWidth;
+    const H = canvas.offsetHeight;
+    canvas.width = W;
+    canvas.height = H;
 
-    // Embers
-    const embers: { x: number; y: number; vx: number; vy: number; life: number; size: number; col: string }[] = [];
-    for (let i = 0; i < 60; i++) {
-      embers.push({
-        x: W / 2 + (Math.random() - 0.5) * 80,
-        y: H * 0.72 - Math.random() * H * 0.4,
-        vx: (Math.random() - 0.5) * 0.8,
-        vy: -(0.4 + Math.random() * 1.2),
-        life: Math.random(),
-        size: 0.8 + Math.random() * 1.8,
-        col: Math.random() > 0.5 ? "#ff9900" : "#ffcc44",
-      });
-    }
+    // Particles — soft glowing blobs that rise
+    const particles: {
+      x: number; y: number;
+      vx: number; vy: number;
+      life: number; maxLife: number;
+      size: number;
+      hue: number;
+    }[] = [];
 
-    const spawnEmber = () => ({
-      x: W / 2 + (Math.random() - 0.5) * 70,
-      y: H * 0.72,
-      vx: (Math.random() - 0.5) * 0.9,
-      vy: -(0.5 + Math.random() * 1.5),
+    const spawnParticle = () => ({
+      x: W / 2 + (Math.random() - 0.5) * 60,
+      y: H * 0.75,
+      vx: (Math.random() - 0.5) * 1.2,
+      vy: -(1.5 + Math.random() * 2.5),
       life: 1,
-      size: 0.8 + Math.random() * 2,
-      col: Math.random() > 0.4 ? "#ff8800" : "#ffdd55",
+      maxLife: 1,
+      size: 18 + Math.random() * 28,
+      hue: 20 + Math.random() * 30,
     });
+
+    for (let i = 0; i < 60; i++) {
+      const p = spawnParticle();
+      p.y = H * 0.4 + Math.random() * H * 0.4;
+      p.life = Math.random();
+      particles.push(p);
+    }
 
     let t = 0;
 
@@ -465,95 +471,130 @@ function FireCanvas({ playing }: { playing: boolean }) {
       ctx.clearRect(0, 0, W, H);
 
       if (playing) {
-        t += 0.04;
-        const cx = W / 2, fireY = H * 0.72;
+        t += 0.03;
 
-        // --- Background: dark forest night ---
-        const bgGrad = ctx.createLinearGradient(0, 0, 0, H);
-        bgGrad.addColorStop(0, "#080c08");
-        bgGrad.addColorStop(0.6, "#0d1a0d");
-        bgGrad.addColorStop(1, "#0a0e08");
-        ctx.fillStyle = bgGrad;
+        // Dark night forest background
+        const bg = ctx.createLinearGradient(0, 0, 0, H);
+        bg.addColorStop(0, "#050805");
+        bg.addColorStop(1, "#0a0e07");
+        ctx.fillStyle = bg;
         ctx.fillRect(0, 0, W, H);
 
         // Stars
-        for (let i = 0; i < 40; i++) {
-          const sx = ((i * 137.5) % W);
-          const sy = ((i * 97.3) % (H * 0.5));
-          const twinkle = 0.3 + 0.5 * Math.abs(Math.sin(t * 0.8 + i));
+        for (let i = 0; i < 50; i++) {
+          const sx = (i * 137.5) % W;
+          const sy = (i * 79.3) % (H * 0.45);
+          const tw = 0.2 + 0.6 * Math.abs(Math.sin(t * 0.4 + i));
           ctx.beginPath();
           ctx.arc(sx, sy, 0.6, 0, Math.PI * 2);
-          ctx.fillStyle = `rgba(255,255,220,${twinkle})`;
+          ctx.fillStyle = `rgba(255,255,220,${tw})`;
           ctx.fill();
         }
 
-        // Warm glow from fire
-        const glow = ctx.createRadialGradient(cx, fireY, 10, cx, fireY, 200);
-        glow.addColorStop(0, `rgba(255,120,20,${0.18 + Math.sin(t * 1.3) * 0.04})`);
-        glow.addColorStop(0.4, `rgba(255,80,0,${0.08 + Math.sin(t * 0.9) * 0.02})`);
+        // Warm ambient glow
+        const glow = ctx.createRadialGradient(W/2, H*0.75, 0, W/2, H*0.75, W * 0.7);
+        glow.addColorStop(0, `rgba(255,100,10,${0.15 + Math.sin(t*1.1)*0.03})`);
+        glow.addColorStop(0.4, `rgba(200,60,0,0.06)`);
         glow.addColorStop(1, "rgba(0,0,0,0)");
         ctx.fillStyle = glow;
         ctx.fillRect(0, 0, W, H);
 
-        // Dark silhouette trees
-        for (let i = 0; i < 6; i++) {
-          const tx = (i / 5) * W + (i % 2 === 0 ? -20 : 20);
-          const th = H * 0.35 + (i % 3) * 30;
+        // Tree silhouettes
+        [[0.05,130],[0.18,160],[0.35,145],[0.65,148],[0.82,155],[0.95,125]].forEach(([xf, h]: any) => {
+          const tx = xf * W;
           ctx.beginPath();
           ctx.moveTo(tx, H);
-          ctx.lineTo(tx - 18, H - th * 0.4);
-          ctx.lineTo(tx, H - th);
-          ctx.lineTo(tx + 18, H - th * 0.4);
+          ctx.lineTo(tx - 15, H - h * 0.45);
+          ctx.lineTo(tx, H - h);
+          ctx.lineTo(tx + 15, H - h * 0.45);
           ctx.closePath();
-          ctx.fillStyle = "rgba(5,10,5,0.85)";
+          ctx.fillStyle = "rgba(4,8,4,0.9)";
           ctx.fill();
-        }
+        });
 
         // Ground
-        const groundGrad = ctx.createLinearGradient(0, H * 0.78, 0, H);
-        groundGrad.addColorStop(0, "#1a1208");
-        groundGrad.addColorStop(1, "#0d0b06");
-        ctx.fillStyle = groundGrad;
+        ctx.fillStyle = "#0d0b06";
         ctx.fillRect(0, H * 0.78, W, H * 0.22);
 
         // Logs
-        const logY = fireY + 18;
-        // Log 1
-        ctx.save();
-        ctx.translate(cx - 10, logY);
-        ctx.rotate(-0.35);
-        const log1 = ctx.createLinearGradient(0, -6, 0, 6);
-        log1.addColorStop(0, "#5c3310");
-        log1.addColorStop(0.5, "#3a1e08");
-        log1.addColorStop(1, "#1e0e04");
-        ctx.fillStyle = log1;
-        ctx.beginPath();
-        ctx.ellipse(0, 0, 45, 7, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-        // Log 2
-        ctx.save();
-        ctx.translate(cx + 10, logY + 4);
-        ctx.rotate(0.38);
-        const log2 = ctx.createLinearGradient(0, -6, 0, 6);
-        log2.addColorStop(0, "#5c3310");
-        log2.addColorStop(0.5, "#3a1e08");
-        log2.addColorStop(1, "#1e0e04");
-        ctx.fillStyle = log2;
-        ctx.beginPath();
-        ctx.ellipse(0, 0, 42, 6, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-        // Glowing log ends
-        ctx.beginPath();
-        ctx.arc(cx - 42, logY + 4, 5, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(255,80,10,${0.5 + Math.sin(t * 2.1) * 0.2})`;
-        ctx.fill();
-        ctx.beginPath();
-        ctx.arc(cx + 40, logY + 6, 4, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(255,60,5,${0.4 + Math.sin(t * 1.8) * 0.2})`;
-        ctx.fill();
+        const drawLog = (lx: number, ly: number, angle: number) => {
+          ctx.save();
+          ctx.translate(lx, ly);
+          ctx.rotate(angle);
+          const lg = ctx.createLinearGradient(0, -7, 0, 7);
+          lg.addColorStop(0, "#5a3010");
+          lg.addColorStop(0.5, "#3a1e08");
+          lg.addColorStop(1, "#1a0a03");
+          ctx.fillStyle = lg;
+          ctx.beginPath();
+          ctx.ellipse(0, 0, 48, 7, 0, 0, Math.PI * 2);
+          ctx.fill();
+          // Glowing end
+          ctx.beginPath();
+          ctx.arc(48, 0, 5, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(255,70,5,${0.5 + Math.sin(t*2)*0.2})`;
+          ctx.fill();
+          ctx.restore();
+        };
+        drawLog(W/2 - 8, H * 0.77, -0.32);
+        drawLog(W/2 + 8, H * 0.775, 0.35);
 
+        // ── FIRE PARTICLES (blur+contrast applied via CSS wrapper) ──
+        particles.forEach(p => {
+          p.x += p.vx + Math.sin(t * 2 + p.y * 0.02) * 0.4;
+          p.y += p.vy;
+          p.vy -= 0.02;
+          p.life -= 0.012;
+          p.size *= 0.993;
+
+          if (p.life <= 0 || p.y < H * 0.1) {
+            Object.assign(p, spawnParticle());
+            return;
+          }
+
+          const a = p.life * 0.9;
+          const r = Math.min(255, 255);
+          const g = Math.floor(Math.min(255, p.hue * 3 * p.life));
+          const b = 0;
+
+          const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size);
+          grad.addColorStop(0, `rgba(${r},${g},${b},${a})`);
+          grad.addColorStop(0.4, `rgba(${r},${Math.floor(g*0.6)},0,${a * 0.6})`);
+          grad.addColorStop(1, `rgba(255,20,0,0)`);
+
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+          ctx.fillStyle = grad;
+          ctx.fill();
+        });
+
+        // Embers floating up
+        for (let i = 0; i < 3; i++) {
+          const ex = W/2 + Math.sin(t * 2.1 + i * 2) * 35;
+          const ey = H * 0.75 - ((t * 25 * (i+1)) % (H * 0.6));
+          const ea = Math.max(0, 1 - (H*0.75 - ey) / (H*0.6));
+          ctx.beginPath();
+          ctx.arc(ex, ey, 1.2, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(255,180,50,${ea * 0.8})`;
+          ctx.fill();
+        }
+      }
+
+      animRef.current = requestAnimationFrame(draw);
+    };
+    draw();
+    return () => cancelAnimationFrame(animRef.current);
+  }, [playing]);
+
+  return (
+    <div
+      className="absolute inset-0"
+      style={{ filter: playing ? "blur(8px) contrast(18)" : "none" }}
+    >
+      <canvas ref={canvasRef} className="w-full h-full" />
+    </div>
+  );
+}
         // Flame layers (4 layers, wide at base, narrow at top)
         const flameColors = [
           { r: 255, g: 40, b: 0 },
