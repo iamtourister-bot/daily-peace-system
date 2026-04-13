@@ -95,9 +95,8 @@ const SOUNDS: {
   },
 ];
 
-// ── CANVAS VISUALIZERS ──────────────────────────────────────────────────────
+// ── VISUALIZERS ─────────────────────────────────────────────────────────────
 
-// 1. RAIN — motion-trail drops + elliptical splash ripples + bounce droplets
 function RainCanvas({ playing }: { playing: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number>(0);
@@ -111,11 +110,7 @@ function RainCanvas({ playing }: { playing: boolean }) {
 
     function mkDrop() {
       const spd = 9 + Math.random() * 11;
-      return {
-        x: Math.random() * (W + 100) - 50, y: -20 - Math.random() * H * 0.6,
-        vx: spd * 0.18, vy: spd, thick: 0.5 + Math.random() * 0.9,
-        alpha: 0.2 + Math.random() * 0.5, trail: [] as { x: number; y: number }[],
-      };
+      return { x: Math.random() * (W + 100) - 50, y: -20 - Math.random() * H * 0.6, vx: spd * 0.18, vy: spd, thick: 0.5 + Math.random() * 0.9, alpha: 0.2 + Math.random() * 0.5, trail: [] as { x: number; y: number }[] };
     }
     function splash(x: number, y: number) {
       for (let i = 0; i < 4 + Math.random() * 5; i++) {
@@ -166,7 +161,6 @@ function RainCanvas({ playing }: { playing: boolean }) {
   return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
 }
 
-// 2. THUNDER — same heavy rain + recursive branching lightning + full-screen flash
 function ThunderCanvas({ playing }: { playing: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number>(0);
@@ -224,8 +218,6 @@ function ThunderCanvas({ playing }: { playing: boolean }) {
   return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
 }
 
-// 3. OCEAN — 5 layered sinusoidal wave bands with parallax depth + foam crests + spray particles
-// Each layer moves at different speed to create real depth illusion
 function OceanCanvas({ playing }: { playing: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number>(0);
@@ -239,82 +231,47 @@ function OceanCanvas({ playing }: { playing: boolean }) {
 
     const foam: { x: number; y: number; vx: number; vy: number; life: number; r: number }[] = [];
     for (let i = 0; i < 35; i++) {
-      foam.push({
-        x: Math.random() * W,
-        y: H * 0.45 + Math.random() * H * 0.2,
-        vx: (Math.random() - 0.5) * 0.4,
-        vy: -Math.random() * 0.2,
-        life: Math.random(),
-        r: 0.8 + Math.random() * 2,
-      });
+      foam.push({ x: Math.random() * W, y: H * 0.45 + Math.random() * H * 0.2, vx: (Math.random() - 0.5) * 0.4, vy: -Math.random() * 0.2, life: Math.random(), r: 0.8 + Math.random() * 2 });
     }
 
     const draw = () => {
       ctx.clearRect(0, 0, W, H);
       if (playing) {
         t += 0.006;
-
-        // Sky
         const skyGrad = ctx.createLinearGradient(0, 0, 0, H * 0.42);
-        skyGrad.addColorStop(0, "#04080f");
-        skyGrad.addColorStop(0.5, "#060d1a");
-        skyGrad.addColorStop(1, "#0a1628");
-        ctx.fillStyle = skyGrad;
-        ctx.fillRect(0, 0, W, H * 0.42);
+        skyGrad.addColorStop(0, "#04080f"); skyGrad.addColorStop(0.5, "#060d1a"); skyGrad.addColorStop(1, "#0a1628");
+        ctx.fillStyle = skyGrad; ctx.fillRect(0, 0, W, H * 0.42);
 
-        // Stars
         for (let i = 0; i < 60; i++) {
-          const sx = ((i * 131.7) % W);
-          const sy = ((i * 73.1) % (H * 0.38));
+          const sx = ((i * 131.7) % W), sy = ((i * 73.1) % (H * 0.38));
           const tw = 0.2 + 0.6 * Math.abs(Math.sin(t * 0.5 + i * 0.7));
-          ctx.beginPath();
-          ctx.arc(sx, sy, 0.7, 0, Math.PI * 2);
-          ctx.fillStyle = `rgba(255,255,240,${tw})`;
-          ctx.fill();
+          ctx.beginPath(); ctx.arc(sx, sy, 0.7, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(255,255,240,${tw})`; ctx.fill();
         }
 
-        // Moon
         const moonX = W * 0.75, moonY = H * 0.12;
         const moonGlow = ctx.createRadialGradient(moonX, moonY, 5, moonX, moonY, 45);
-        moonGlow.addColorStop(0, "rgba(255,245,200,0.12)");
-        moonGlow.addColorStop(1, "rgba(0,0,0,0)");
-        ctx.fillStyle = moonGlow;
-        ctx.beginPath(); ctx.arc(moonX, moonY, 45, 0, Math.PI * 2); ctx.fill();
+        moonGlow.addColorStop(0, "rgba(255,245,200,0.12)"); moonGlow.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.fillStyle = moonGlow; ctx.beginPath(); ctx.arc(moonX, moonY, 45, 0, Math.PI * 2); ctx.fill();
         ctx.beginPath(); ctx.arc(moonX, moonY, 14, 0, Math.PI * 2);
         ctx.fillStyle = "rgba(255,248,210,0.92)"; ctx.fill();
 
-        // Moon reflection on water
-        const reflGrad = ctx.createLinearGradient(moonX, H * 0.42, moonX, H);
-        reflGrad.addColorStop(0, "rgba(255,248,200,0.12)");
-        reflGrad.addColorStop(0.3, "rgba(255,248,200,0.06)");
-        reflGrad.addColorStop(1, "rgba(255,248,200,0)");
-        ctx.fillStyle = reflGrad;
         for (let row = 0; row < 18; row++) {
           const ry = H * 0.42 + row * (H * 0.58 / 18);
           const rw = 12 + row * 3 + Math.sin(t * 2 + row) * 4;
           const rx = moonX + Math.sin(t * 1.5 + row * 0.4) * (row * 1.5);
           ctx.fillStyle = `rgba(255,248,200,${0.08 - row * 0.004})`;
-          ctx.beginPath();
-          ctx.ellipse(rx, ry, rw, 1.5, 0, 0, Math.PI * 2);
-          ctx.fill();
+          ctx.beginPath(); ctx.ellipse(rx, ry, rw, 1.5, 0, 0, Math.PI * 2); ctx.fill();
         }
 
-        // Horizon glow
         const horizGrad = ctx.createLinearGradient(0, H * 0.38, 0, H * 0.48);
-        horizGrad.addColorStop(0, "rgba(20,50,100,0.5)");
-        horizGrad.addColorStop(1, "rgba(10,30,70,0)");
-        ctx.fillStyle = horizGrad;
-        ctx.fillRect(0, H * 0.38, W, H * 0.1);
+        horizGrad.addColorStop(0, "rgba(20,50,100,0.5)"); horizGrad.addColorStop(1, "rgba(10,30,70,0)");
+        ctx.fillStyle = horizGrad; ctx.fillRect(0, H * 0.38, W, H * 0.1);
 
-        // Ocean water body
         const waterGrad = ctx.createLinearGradient(0, H * 0.42, 0, H);
-        waterGrad.addColorStop(0, "#0a2040");
-        waterGrad.addColorStop(0.3, "#071830");
-        waterGrad.addColorStop(1, "#040f1e");
-        ctx.fillStyle = waterGrad;
-        ctx.fillRect(0, H * 0.42, W, H * 0.58);
+        waterGrad.addColorStop(0, "#0a2040"); waterGrad.addColorStop(0.3, "#071830"); waterGrad.addColorStop(1, "#040f1e");
+        ctx.fillStyle = waterGrad; ctx.fillRect(0, H * 0.42, W, H * 0.58);
 
-        // 5 wave layers
         const layers = [
           { yF: 0.42, amp: 14, fq: 0.012, spd: 1.0, colR: 25, colG: 80, colB: 140, a: 0.55 },
           { yF: 0.52, amp: 9, fq: 0.016, spd: 0.72, colR: 18, colG: 65, colB: 120, a: 0.45 },
@@ -327,10 +284,7 @@ function OceanCanvas({ playing }: { playing: boolean }) {
           const yBase = H * l.yF;
           ctx.beginPath(); ctx.moveTo(0, yBase);
           for (let x = 0; x <= W; x += 3) {
-            const y = yBase
-              + Math.sin(x * l.fq + t * l.spd) * l.amp
-              + Math.sin(x * l.fq * 0.6 + t * l.spd * 0.65 + li) * l.amp * 0.5
-              + Math.sin(x * l.fq * 1.9 + t * l.spd * 1.5) * l.amp * 0.18;
+            const y = yBase + Math.sin(x * l.fq + t * l.spd) * l.amp + Math.sin(x * l.fq * 0.6 + t * l.spd * 0.65 + li) * l.amp * 0.5 + Math.sin(x * l.fq * 1.9 + t * l.spd * 1.5) * l.amp * 0.18;
             ctx.lineTo(x, y);
           }
           ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath();
@@ -338,26 +292,17 @@ function OceanCanvas({ playing }: { playing: boolean }) {
           wg.addColorStop(0, `rgba(${l.colR + 20},${l.colG + 30},${l.colB + 40},${l.a})`);
           wg.addColorStop(1, `rgba(${l.colR},${l.colG},${l.colB},${l.a * 0.4})`);
           ctx.fillStyle = wg; ctx.fill();
-
-          // Crest highlight
           ctx.beginPath(); ctx.moveTo(0, yBase);
           for (let x = 0; x <= W; x += 3) {
-            const y = yBase
-              + Math.sin(x * l.fq + t * l.spd) * l.amp
-              + Math.sin(x * l.fq * 0.6 + t * l.spd * 0.65 + li) * l.amp * 0.5
-              + Math.sin(x * l.fq * 1.9 + t * l.spd * 1.5) * l.amp * 0.18;
+            const y = yBase + Math.sin(x * l.fq + t * l.spd) * l.amp + Math.sin(x * l.fq * 0.6 + t * l.spd * 0.65 + li) * l.amp * 0.5 + Math.sin(x * l.fq * 1.9 + t * l.spd * 1.5) * l.amp * 0.18;
             ctx.lineTo(x, y);
           }
           ctx.strokeStyle = `rgba(255,255,255,${li === 0 ? 0.18 : 0.08})`; ctx.lineWidth = li === 0 ? 1.2 : 0.6; ctx.stroke();
         });
 
-        // Foam particles
         foam.forEach(p => {
           p.x += p.vx; p.y += p.vy; p.life -= 0.005;
-          if (p.life <= 0) {
-            p.x = Math.random() * W; p.y = H * (0.42 + Math.random() * 0.2);
-            p.vx = (Math.random() - 0.5) * 0.4; p.vy = -Math.random() * 0.2; p.life = 0.7 + Math.random() * 0.3;
-          }
+          if (p.life <= 0) { p.x = Math.random() * W; p.y = H * (0.42 + Math.random() * 0.2); p.vx = (Math.random() - 0.5) * 0.4; p.vy = -Math.random() * 0.2; p.life = 0.7 + Math.random() * 0.3; }
           ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
           ctx.fillStyle = `rgba(255,255,255,${p.life * 0.35})`; ctx.fill();
         });
@@ -370,7 +315,6 @@ function OceanCanvas({ playing }: { playing: boolean }) {
   return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
 }
 
-// 4. FOREST — swaying procedural trees + god rays + flocking V-birds
 function ForestCanvas({ playing }: { playing: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number>(0);
@@ -424,7 +368,6 @@ function ForestCanvas({ playing }: { playing: boolean }) {
   return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
 }
 
-// 5. FIRE — Doom cellular automaton: black → deep red → orange → yellow → white
 function FireCanvas({ playing }: { playing: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number>(0);
@@ -438,14 +381,7 @@ function FireCanvas({ playing }: { playing: boolean }) {
     canvas.width = W;
     canvas.height = H;
 
-    // Particles — soft glowing blobs that rise
-    const particles: {
-      x: number; y: number;
-      vx: number; vy: number;
-      life: number; maxLife: number;
-      size: number;
-      hue: number;
-    }[] = [];
+    const particles: { x: number; y: number; vx: number; vy: number; life: number; size: number; hue: number }[] = [];
 
     const spawnParticle = () => ({
       x: W / 2 + (Math.random() - 0.5) * 60,
@@ -453,7 +389,6 @@ function FireCanvas({ playing }: { playing: boolean }) {
       vx: (Math.random() - 0.5) * 1.2,
       vy: -(1.5 + Math.random() * 2.5),
       life: 1,
-      maxLife: 1,
       size: 18 + Math.random() * 28,
       hue: 20 + Math.random() * 30,
     });
@@ -469,18 +404,15 @@ function FireCanvas({ playing }: { playing: boolean }) {
 
     const draw = () => {
       ctx.clearRect(0, 0, W, H);
-
       if (playing) {
         t += 0.03;
 
-        // Dark night forest background
         const bg = ctx.createLinearGradient(0, 0, 0, H);
         bg.addColorStop(0, "#050805");
         bg.addColorStop(1, "#0a0e07");
         ctx.fillStyle = bg;
         ctx.fillRect(0, 0, W, H);
 
-        // Stars
         for (let i = 0; i < 50; i++) {
           const sx = (i * 137.5) % W;
           const sy = (i * 79.3) % (H * 0.45);
@@ -491,16 +423,14 @@ function FireCanvas({ playing }: { playing: boolean }) {
           ctx.fill();
         }
 
-        // Warm ambient glow
-        const glow = ctx.createRadialGradient(W/2, H*0.75, 0, W/2, H*0.75, W * 0.7);
-        glow.addColorStop(0, `rgba(255,100,10,${0.15 + Math.sin(t*1.1)*0.03})`);
-        glow.addColorStop(0.4, `rgba(200,60,0,0.06)`);
+        const glow = ctx.createRadialGradient(W / 2, H * 0.75, 0, W / 2, H * 0.75, W * 0.7);
+        glow.addColorStop(0, `rgba(255,100,10,${0.15 + Math.sin(t * 1.1) * 0.03})`);
+        glow.addColorStop(0.4, "rgba(200,60,0,0.06)");
         glow.addColorStop(1, "rgba(0,0,0,0)");
         ctx.fillStyle = glow;
         ctx.fillRect(0, 0, W, H);
 
-        // Tree silhouettes
-        [[0.05,130],[0.18,160],[0.35,145],[0.65,148],[0.82,155],[0.95,125]].forEach(([xf, h]: any) => {
+        [[0.05, 130], [0.18, 160], [0.35, 145], [0.65, 148], [0.82, 155], [0.95, 125]].forEach(([xf, h]: any) => {
           const tx = xf * W;
           ctx.beginPath();
           ctx.moveTo(tx, H);
@@ -512,11 +442,9 @@ function FireCanvas({ playing }: { playing: boolean }) {
           ctx.fill();
         });
 
-        // Ground
         ctx.fillStyle = "#0d0b06";
         ctx.fillRect(0, H * 0.78, W, H * 0.22);
 
-        // Logs
         const drawLog = (lx: number, ly: number, angle: number) => {
           ctx.save();
           ctx.translate(lx, ly);
@@ -529,57 +457,47 @@ function FireCanvas({ playing }: { playing: boolean }) {
           ctx.beginPath();
           ctx.ellipse(0, 0, 48, 7, 0, 0, Math.PI * 2);
           ctx.fill();
-          // Glowing end
           ctx.beginPath();
           ctx.arc(48, 0, 5, 0, Math.PI * 2);
-          ctx.fillStyle = `rgba(255,70,5,${0.5 + Math.sin(t*2)*0.2})`;
+          ctx.fillStyle = `rgba(255,70,5,${0.5 + Math.sin(t * 2) * 0.2})`;
           ctx.fill();
           ctx.restore();
         };
-        drawLog(W/2 - 8, H * 0.77, -0.32);
-        drawLog(W/2 + 8, H * 0.775, 0.35);
+        drawLog(W / 2 - 8, H * 0.77, -0.32);
+        drawLog(W / 2 + 8, H * 0.775, 0.35);
 
-        // ── FIRE PARTICLES (blur+contrast applied via CSS wrapper) ──
         particles.forEach(p => {
           p.x += p.vx + Math.sin(t * 2 + p.y * 0.02) * 0.4;
           p.y += p.vy;
           p.vy -= 0.02;
           p.life -= 0.012;
           p.size *= 0.993;
-
           if (p.life <= 0 || p.y < H * 0.1) {
             Object.assign(p, spawnParticle());
             return;
           }
-
           const a = p.life * 0.9;
-          const r = Math.min(255, 255);
           const g = Math.floor(Math.min(255, p.hue * 3 * p.life));
-          const b = 0;
-
           const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size);
-          grad.addColorStop(0, `rgba(${r},${g},${b},${a})`);
-          grad.addColorStop(0.4, `rgba(${r},${Math.floor(g*0.6)},0,${a * 0.6})`);
-          grad.addColorStop(1, `rgba(255,20,0,0)`);
-
+          grad.addColorStop(0, `rgba(255,${g},0,${a})`);
+          grad.addColorStop(0.4, `rgba(255,${Math.floor(g * 0.6)},0,${a * 0.6})`);
+          grad.addColorStop(1, "rgba(255,20,0,0)");
           ctx.beginPath();
           ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
           ctx.fillStyle = grad;
           ctx.fill();
         });
 
-        // Embers floating up
         for (let i = 0; i < 3; i++) {
-          const ex = W/2 + Math.sin(t * 2.1 + i * 2) * 35;
-          const ey = H * 0.75 - ((t * 25 * (i+1)) % (H * 0.6));
-          const ea = Math.max(0, 1 - (H*0.75 - ey) / (H*0.6));
+          const ex = W / 2 + Math.sin(t * 2.1 + i * 2) * 35;
+          const ey = H * 0.75 - ((t * 25 * (i + 1)) % (H * 0.6));
+          const ea = Math.max(0, 1 - (H * 0.75 - ey) / (H * 0.6));
           ctx.beginPath();
           ctx.arc(ex, ey, 1.2, 0, Math.PI * 2);
           ctx.fillStyle = `rgba(255,180,50,${ea * 0.8})`;
           ctx.fill();
         }
       }
-
       animRef.current = requestAnimationFrame(draw);
     };
     draw();
@@ -587,76 +505,12 @@ function FireCanvas({ playing }: { playing: boolean }) {
   }, [playing]);
 
   return (
-    <div
-      className="absolute inset-0"
-      style={{ filter: playing ? "blur(8px) contrast(18)" : "none" }}
-    >
+    <div className="absolute inset-0" style={{ filter: playing ? "blur(8px) contrast(18)" : "none" }}>
       <canvas ref={canvasRef} className="w-full h-full" />
     </div>
   );
 }
-        // Flame layers (4 layers, wide at base, narrow at top)
-        const flameColors = [
-          { r: 255, g: 40, b: 0 },
-          { r: 255, g: 90, b: 10 },
-          { r: 255, g: 150, b: 20 },
-          { r: 255, g: 210, b: 80 },
-        ];
-        for (let layer = 0; layer < 4; layer++) {
-          const spread = 55 - layer * 10;
-          const height = 80 + layer * 15 + Math.sin(t * (1.5 + layer * 0.4)) * 12;
-          const wobble = Math.sin(t * (1.2 + layer * 0.3)) * 8;
-          const { r, g, b } = flameColors[layer];
-          const alpha = 0.55 - layer * 0.1;
 
-          ctx.beginPath();
-          ctx.moveTo(cx - spread, fireY);
-          ctx.bezierCurveTo(
-            cx - spread * 0.8, fireY - height * 0.4,
-            cx - spread * 0.3 + wobble, fireY - height * 0.75,
-            cx + wobble * 0.5, fireY - height
-          );
-          ctx.bezierCurveTo(
-            cx + spread * 0.3 + wobble, fireY - height * 0.75,
-            cx + spread * 0.8, fireY - height * 0.4,
-            cx + spread, fireY
-          );
-          ctx.closePath();
-          const fg = ctx.createLinearGradient(cx, fireY, cx, fireY - height);
-          fg.addColorStop(0, `rgba(${r},${g},${b},${alpha})`);
-          fg.addColorStop(0.6, `rgba(${r},${Math.min(255, g + 30)},${b + 10},${alpha * 0.6})`);
-          fg.addColorStop(1, `rgba(255,255,200,0)`);
-          ctx.fillStyle = fg;
-          ctx.fill();
-        }
-
-        // Embers
-        for (let i = embers.length - 1; i >= 0; i--) {
-          const e = embers[i];
-          e.x += e.vx + Math.sin(t * 2 + i) * 0.2;
-          e.y += e.vy;
-          e.vy -= 0.008;
-          e.life -= 0.008;
-          if (e.life <= 0 || e.y < 0) { embers[i] = spawnEmber(); continue; }
-          ctx.beginPath();
-          ctx.arc(e.x, e.y, e.size * e.life, 0, Math.PI * 2);
-          ctx.fillStyle = e.col.replace(")", `,${e.life * 0.9})`).replace("rgb", "rgba");
-          ctx.shadowColor = e.col;
-          ctx.shadowBlur = 4;
-          ctx.fill();
-          ctx.shadowBlur = 0;
-        }
-      }
-
-      animRef.current = requestAnimationFrame(draw);
-    };
-    draw();
-    return () => cancelAnimationFrame(animRef.current);
-  }, [playing]);
-  return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
-}
-
-// 6. TIBETAN BOWL — physics-accurate radiating pulse rings from center
 function BowlCanvas({ playing }: { playing: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number>(0);
@@ -695,7 +549,6 @@ function BowlCanvas({ playing }: { playing: boolean }) {
   return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
 }
 
-// 7. WHITE NOISE — live oscilloscope ring-buffer waveform
 function NoiseCanvas({ playing }: { playing: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number>(0);
@@ -731,7 +584,6 @@ function NoiseCanvas({ playing }: { playing: boolean }) {
   return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
 }
 
-// 8. BROWN NOISE — Brownian motion waveform + deep rolling sine underlayers
 function BrownCanvas({ playing }: { playing: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number>(0);
@@ -776,7 +628,6 @@ function BrownCanvas({ playing }: { playing: boolean }) {
   return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
 }
 
-// 9. AUTUMN WIND — bezier leaf shapes with midrib vein + wobble physics + tumbling rotation
 function AutumnCanvas({ playing }: { playing: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number>(0);
@@ -825,7 +676,6 @@ function AutumnCanvas({ playing }: { playing: boolean }) {
   return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
 }
 
-// 10. DEEP WIND — horizontal sinusoidal streaks + speed variation + drifting dust motes
 function WindCanvas({ playing }: { playing: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number>(0);
@@ -868,20 +718,18 @@ function WindCanvas({ playing }: { playing: boolean }) {
 
 function getVisualizer(id: SoundId, isPlaying: boolean) {
   switch (id) {
-    case "rain":    return <RainCanvas playing={isPlaying} />;
+    case "rain": return <RainCanvas playing={isPlaying} />;
     case "thunder": return <ThunderCanvas playing={isPlaying} />;
-    case "ocean":   return <OceanCanvas playing={isPlaying} />;
-    case "forest":  return <ForestCanvas playing={isPlaying} />;
-    case "bowl":    return <BowlCanvas playing={isPlaying} />;
-    case "noise":   return <NoiseCanvas playing={isPlaying} />;
-    case "brown":   return <BrownCanvas playing={isPlaying} />;
-    case "fire":    return <FireCanvas playing={isPlaying} />;
-    case "autumn":  return <AutumnCanvas playing={isPlaying} />;
-    case "wind":    return <WindCanvas playing={isPlaying} />;
+    case "ocean": return <OceanCanvas playing={isPlaying} />;
+    case "forest": return <ForestCanvas playing={isPlaying} />;
+    case "bowl": return <BowlCanvas playing={isPlaying} />;
+    case "noise": return <NoiseCanvas playing={isPlaying} />;
+    case "brown": return <BrownCanvas playing={isPlaying} />;
+    case "fire": return <FireCanvas playing={isPlaying} />;
+    case "autumn": return <AutumnCanvas playing={isPlaying} />;
+    case "wind": return <WindCanvas playing={isPlaying} />;
   }
 }
-
-// ── PAGE COMPONENT ──────────────────────────────────────────────────────────
 
 export default function AudioCalm() {
   const [selected, setSelected] = useState<SoundId | null>(null);
