@@ -1,3 +1,4 @@
+import MorningRitual from "@/pages/MorningRitual";
 import LetterToSelf from "@/pages/LetterToSelf";
 import MoodHistory from "@/pages/MoodHistory";
 import { AccessGate } from "@/components/AccessGate";
@@ -47,6 +48,7 @@ function AppRouter() {
         <Route path="/sleep-stories" component={SleepStories} />
         <Route path="/mood-history" component={MoodHistory} />
         <Route path="/letter-to-self" component={LetterToSelf} />
+        <Route path="/morning-ritual" component={MorningRitual} />
         <Route component={NotFound} />
       </Switch>
     </Layout>
