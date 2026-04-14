@@ -34,6 +34,8 @@ export default function Night() {
   const [showOptions, setShowOptions] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const breathRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const animRef = useRef<number>(0);
 
   const current = STEPS[step];
 
@@ -48,19 +50,49 @@ export default function Night() {
     };
   }, []);
 
+  // Animated stars
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d")!;
+    canvas.width = canvas.offsetWidth;
+    canvas.height = canvas.offsetHeight;
+    const W = canvas.width, H = canvas.height;
+
+    const stars = Array.from({ length: 120 }, () => ({
+      x: Math.random() * W,
+      y: Math.random() * H * 0.7,
+      r: 0.3 + Math.random() * 1.2,
+      speed: 0.2 + Math.random() * 0.6,
+      offset: Math.random() * Math.PI * 2,
+    }));
+
+    const draw = () => {
+      ctx.clearRect(0, 0, W, H);
+      const now = Date.now() * 0.001;
+      stars.forEach(s => {
+        const alpha = 0.2 + 0.6 * Math.abs(Math.sin(now * s.speed + s.offset));
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255,255,220,${alpha})`;
+        ctx.fill();
+      });
+      animRef.current = requestAnimationFrame(draw);
+    };
+    draw();
+    return () => cancelAnimationFrame(animRef.current);
+  }, []);
+
   // Auto advance
   useEffect(() => {
     if (current.type === "ending") {
-      // Fade in options after 2 seconds
       const t = setTimeout(() => setShowOptions(true), 2000);
       return () => clearTimeout(t);
     }
-
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => {
       advanceStep();
     }, current.duration);
-
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
@@ -99,25 +131,30 @@ export default function Night() {
         className="flex flex-col min-h-[100dvh] relative overflow-hidden"
         onClick={handleTap}
       >
+        {/* Background image */}
         <div
           className="absolute inset-0 bg-cover bg-center"
           style={{ backgroundImage: `url(${NIGHT_BG})` }}
         />
         <div className="absolute inset-0 bg-black/75" />
-<canvas
-  id="stars-canvas"
-  className="absolute inset-0 w-full h-full"
-  style={{ zIndex: 1 }}
-/>
 
+        {/* Animated stars canvas */}
+        <canvas
+          ref={canvasRef}
+          className="absolute inset-0 w-full h-full"
+          style={{ zIndex: 1 }}
+        />
+
+        {/* Close button */}
         <button
           onClick={(e) => { e.stopPropagation(); setLocation("/"); }}
-          className="absolute top-6 right-6 w-10 h-10 rounded-full bg-white/10 flex items-center justify-center text-white/40 hover:text-white z-10"
+          className="absolute top-6 right-6 w-10 h-10 rounded-full bg-white/10 flex items-center justify-center text-white/40 hover:text-white z-20"
         >
           <X className="w-5 h-5" />
         </button>
 
-        <div className="flex flex-col items-center justify-center flex-1 px-8 relative z-10">
+        {/* Main content */}
+        <div className="flex flex-col items-center justify-center flex-1 px-8 relative z-20">
           <AnimatePresence mode="wait">
 
             {/* Text steps */}
@@ -217,9 +254,9 @@ export default function Night() {
           </AnimatePresence>
         </div>
 
-        {/* Soft dots — no pressure */}
+        {/* Soft dots */}
         {current.type !== "ending" && (
-          <div className="relative z-10 flex justify-center gap-1.5 pb-14">
+          <div className="relative z-20 flex justify-center gap-1.5 pb-14">
             {STEPS.filter(s => s.type !== "ending").map((_, i) => (
               <motion.div
                 key={i}
