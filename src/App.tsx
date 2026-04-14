@@ -1,3 +1,4 @@
+import MoodHistory from "@/pages/MoodHistory";
 import { AccessGate } from "@/components/AccessGate";
 import SleepStories from "@/pages/SleepStories";
 import CalmingRoom from "@/pages/CalmingRoom";
