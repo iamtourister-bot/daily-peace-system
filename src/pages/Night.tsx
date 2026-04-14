@@ -104,6 +104,11 @@ export default function Night() {
           style={{ backgroundImage: `url(${NIGHT_BG})` }}
         />
         <div className="absolute inset-0 bg-black/75" />
+<canvas
+  id="stars-canvas"
+  className="absolute inset-0 w-full h-full"
+  style={{ zIndex: 1 }}
+/>
 
         <button
           onClick={(e) => { e.stopPropagation(); setLocation("/"); }}
