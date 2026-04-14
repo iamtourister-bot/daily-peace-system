@@ -44,6 +44,7 @@ function AppRouter() {
         <Route path="/techniques" component={Techniques} />
         <Route path="/calming-room" component={CalmingRoom} />
         <Route path="/sleep-stories" component={SleepStories} />
+        <Route path="/mood-history" component={MoodHistory} />
         <Route component={NotFound} />
       </Switch>
     </Layout>
