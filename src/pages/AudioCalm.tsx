@@ -95,71 +95,32 @@ const SOUNDS: {
   },
 ];
 
-// ── VISUALIZERS ─────────────────────────────────────────────────────────────
+// ── YOUTUBE BACKGROUNDS ─────────────────────────────────────────────────────
 
-function RainCanvas({ playing }: { playing: boolean }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const animRef = useRef<number>(0);
-  const state = useRef<{ drops: any[]; splashes: any[] }>({ drops: [], splashes: [] });
-
-  useEffect(() => {
-    const canvas = canvasRef.current; if (!canvas) return;
-    const ctx = canvas.getContext("2d")!;
-    canvas.width = canvas.offsetWidth; canvas.height = canvas.offsetHeight;
-    const W = canvas.width, H = canvas.height;
-
-    function mkDrop() {
-      const spd = 9 + Math.random() * 11;
-      return { x: Math.random() * (W + 100) - 50, y: -20 - Math.random() * H * 0.6, vx: spd * 0.18, vy: spd, thick: 0.5 + Math.random() * 0.9, alpha: 0.2 + Math.random() * 0.5, trail: [] as { x: number; y: number }[] };
-    }
-    function splash(x: number, y: number) {
-      for (let i = 0; i < 4 + Math.random() * 5; i++) {
-        const a = -Math.PI + Math.random() * Math.PI, s = 1 + Math.random() * 3;
-        state.current.splashes.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 2, life: 1, dec: 0.07 + Math.random() * 0.06, r: 0.4 + Math.random() * 1.2 });
-      }
-      state.current.splashes.push({ rip: true, x, y, r: 0, life: 1 });
-    }
-
-    const { drops, splashes } = state.current;
-    drops.length = 0; splashes.length = 0;
-    for (let i = 0; i < 220; i++) { const d = mkDrop(); d.y = Math.random() * H; drops.push(d); }
-
-    const draw = () => {
-      ctx.clearRect(0, 0, W, H);
-      if (playing) {
-        drops.forEach(d => {
-          d.vy += 0.025; d.x += d.vx; d.y += d.vy;
-          d.trail.push({ x: d.x, y: d.y }); if (d.trail.length > 5) d.trail.shift();
-          if (d.y > H + 5) { if (Math.random() < 0.55) splash(d.x, H - 3); Object.assign(d, mkDrop()); }
-          if (d.trail.length > 1) {
-            ctx.beginPath(); ctx.moveTo(d.trail[0].x, d.trail[0].y);
-            d.trail.forEach(p => ctx.lineTo(p.x, p.y));
-            ctx.lineTo(d.x + d.vx * 0.5, d.y + d.vy * 0.5);
-            ctx.strokeStyle = `rgba(175,212,255,${d.alpha})`; ctx.lineWidth = d.thick; ctx.lineCap = "round"; ctx.stroke();
-          }
-        });
-        for (let i = splashes.length - 1; i >= 0; i--) {
-          const s = splashes[i];
-          if (s.rip) {
-            s.r += 0.9; s.life -= 0.055;
-            if (s.life <= 0) { splashes.splice(i, 1); continue; }
-            ctx.beginPath(); ctx.ellipse(s.x, s.y, s.r, s.r * 0.28, 0, 0, Math.PI * 2);
-            ctx.strokeStyle = `rgba(175,212,255,${s.life * 0.28})`; ctx.lineWidth = 0.7; ctx.stroke();
-          } else {
-            s.vy += 0.18; s.x += s.vx; s.y += s.vy; s.life -= s.dec;
-            if (s.life <= 0 || s.y > H + 5) { splashes.splice(i, 1); continue; }
-            ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
-            ctx.fillStyle = `rgba(200,228,255,${s.life * 0.55})`; ctx.fill();
-          }
-        }
-      }
-      animRef.current = requestAnimationFrame(draw);
-    };
-    draw();
-    return () => cancelAnimationFrame(animRef.current);
-  }, [playing]);
-  return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
+function YouTubeBackground({ videoId }: { videoId: string }) {
+  return (
+    <div className="absolute inset-0 overflow-hidden">
+      <iframe
+        src={`https://www.youtube.com/embed/${videoId}?autoplay=1&mute=1&loop=1&playlist=${videoId}&controls=0&showinfo=0&rel=0&modestbranding=1&playsinline=1`}
+        allow="autoplay; fullscreen"
+        className="absolute"
+        style={{
+          top: "50%",
+          left: "50%",
+          transform: "translate(-50%, -50%)",
+          width: "177.78vh",
+          height: "100vh",
+          minWidth: "100%",
+          minHeight: "56.25vw",
+          border: "none",
+          pointerEvents: "none",
+        }}
+      />
+    </div>
+  );
 }
+
+// ── CANVAS VISUALIZERS ──────────────────────────────────────────────────────
 
 function ThunderCanvas({ playing }: { playing: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -368,149 +329,6 @@ function ForestCanvas({ playing }: { playing: boolean }) {
   return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
 }
 
-function FireCanvas({ playing }: { playing: boolean }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const animRef = useRef<number>(0);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d")!;
-    const W = canvas.offsetWidth;
-    const H = canvas.offsetHeight;
-    canvas.width = W;
-    canvas.height = H;
-
-    const particles: { x: number; y: number; vx: number; vy: number; life: number; size: number; hue: number }[] = [];
-
-    const spawnParticle = () => ({
-      x: W / 2 + (Math.random() - 0.5) * 60,
-      y: H * 0.75,
-      vx: (Math.random() - 0.5) * 1.2,
-      vy: -(1.5 + Math.random() * 2.5),
-      life: 1,
-      size: 18 + Math.random() * 28,
-      hue: 20 + Math.random() * 30,
-    });
-
-    for (let i = 0; i < 60; i++) {
-      const p = spawnParticle();
-      p.y = H * 0.4 + Math.random() * H * 0.4;
-      p.life = Math.random();
-      particles.push(p);
-    }
-
-    let t = 0;
-
-    const draw = () => {
-      ctx.clearRect(0, 0, W, H);
-      if (playing) {
-        t += 0.03;
-
-        const bg = ctx.createLinearGradient(0, 0, 0, H);
-        bg.addColorStop(0, "#050805");
-        bg.addColorStop(1, "#0a0e07");
-        ctx.fillStyle = bg;
-        ctx.fillRect(0, 0, W, H);
-
-        for (let i = 0; i < 50; i++) {
-          const sx = (i * 137.5) % W;
-          const sy = (i * 79.3) % (H * 0.45);
-          const tw = 0.2 + 0.6 * Math.abs(Math.sin(t * 0.4 + i));
-          ctx.beginPath();
-          ctx.arc(sx, sy, 0.6, 0, Math.PI * 2);
-          ctx.fillStyle = `rgba(255,255,220,${tw})`;
-          ctx.fill();
-        }
-
-        const glow = ctx.createRadialGradient(W / 2, H * 0.75, 0, W / 2, H * 0.75, W * 0.7);
-        glow.addColorStop(0, `rgba(255,100,10,${0.15 + Math.sin(t * 1.1) * 0.03})`);
-        glow.addColorStop(0.4, "rgba(200,60,0,0.06)");
-        glow.addColorStop(1, "rgba(0,0,0,0)");
-        ctx.fillStyle = glow;
-        ctx.fillRect(0, 0, W, H);
-
-        [[0.05, 130], [0.18, 160], [0.35, 145], [0.65, 148], [0.82, 155], [0.95, 125]].forEach(([xf, h]: any) => {
-          const tx = xf * W;
-          ctx.beginPath();
-          ctx.moveTo(tx, H);
-          ctx.lineTo(tx - 15, H - h * 0.45);
-          ctx.lineTo(tx, H - h);
-          ctx.lineTo(tx + 15, H - h * 0.45);
-          ctx.closePath();
-          ctx.fillStyle = "rgba(4,8,4,0.9)";
-          ctx.fill();
-        });
-
-        ctx.fillStyle = "#0d0b06";
-        ctx.fillRect(0, H * 0.78, W, H * 0.22);
-
-        const drawLog = (lx: number, ly: number, angle: number) => {
-          ctx.save();
-          ctx.translate(lx, ly);
-          ctx.rotate(angle);
-          const lg = ctx.createLinearGradient(0, -7, 0, 7);
-          lg.addColorStop(0, "#5a3010");
-          lg.addColorStop(0.5, "#3a1e08");
-          lg.addColorStop(1, "#1a0a03");
-          ctx.fillStyle = lg;
-          ctx.beginPath();
-          ctx.ellipse(0, 0, 48, 7, 0, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.beginPath();
-          ctx.arc(48, 0, 5, 0, Math.PI * 2);
-          ctx.fillStyle = `rgba(255,70,5,${0.5 + Math.sin(t * 2) * 0.2})`;
-          ctx.fill();
-          ctx.restore();
-        };
-        drawLog(W / 2 - 8, H * 0.77, -0.32);
-        drawLog(W / 2 + 8, H * 0.775, 0.35);
-
-        particles.forEach(p => {
-          p.x += p.vx + Math.sin(t * 2 + p.y * 0.02) * 0.4;
-          p.y += p.vy;
-          p.vy -= 0.02;
-          p.life -= 0.012;
-          p.size *= 0.993;
-          if (p.life <= 0 || p.y < H * 0.1) {
-            Object.assign(p, spawnParticle());
-            return;
-          }
-          const a = p.life * 0.9;
-          const g = Math.floor(Math.min(255, p.hue * 3 * p.life));
-          const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size);
-          grad.addColorStop(0, `rgba(255,${g},0,${a})`);
-          grad.addColorStop(0.4, `rgba(255,${Math.floor(g * 0.6)},0,${a * 0.6})`);
-          grad.addColorStop(1, "rgba(255,20,0,0)");
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-          ctx.fillStyle = grad;
-          ctx.fill();
-        });
-
-        for (let i = 0; i < 3; i++) {
-          const ex = W / 2 + Math.sin(t * 2.1 + i * 2) * 35;
-          const ey = H * 0.75 - ((t * 25 * (i + 1)) % (H * 0.6));
-          const ea = Math.max(0, 1 - (H * 0.75 - ey) / (H * 0.6));
-          ctx.beginPath();
-          ctx.arc(ex, ey, 1.2, 0, Math.PI * 2);
-          ctx.fillStyle = `rgba(255,180,50,${ea * 0.8})`;
-          ctx.fill();
-        }
-      }
-      animRef.current = requestAnimationFrame(draw);
-    };
-    draw();
-    return () => cancelAnimationFrame(animRef.current);
-  }, [playing]);
-
-  return (
-    <div className="absolute inset-0" style={{ filter: playing ? "blur(8px) contrast(18)" : "none" }}>
-      <canvas ref={canvasRef} className="w-full h-full" />
-    </div>
-  );
-}
-
 function BowlCanvas({ playing }: { playing: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number>(0);
@@ -573,8 +391,6 @@ function NoiseCanvas({ playing }: { playing: boolean }) {
           i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
         }
         ctx.strokeStyle = "rgba(180,200,255,.65)"; ctx.lineWidth = 1.2; ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(0, H / 2); ctx.lineTo(W, H / 2);
-        ctx.strokeStyle = "rgba(255,255,255,.06)"; ctx.lineWidth = 0.5; ctx.stroke();
       }
       animRef.current = requestAnimationFrame(draw);
     };
@@ -611,62 +427,6 @@ function BrownCanvas({ playing }: { playing: boolean }) {
         const grad = ctx.createLinearGradient(0, 0, W, 0);
         grad.addColorStop(0, "rgba(160,90,20,0)"); grad.addColorStop(0.5, "rgba(180,105,25,.7)"); grad.addColorStop(1, "rgba(160,90,20,0)");
         ctx.strokeStyle = grad; ctx.lineWidth = 2.2; ctx.stroke();
-        for (let l = 0; l < 3; l++) {
-          ctx.beginPath();
-          for (let x = 0; x <= W; x += 4) {
-            const y = H / 2 + Math.sin(x * 0.008 + l * 0.7 + t * (l + 1) * 0.4) * (H * 0.12 + l * 8);
-            x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-          }
-          ctx.strokeStyle = `rgba(140,80,15,${0.12 - l * 0.03})`; ctx.lineWidth = 1; ctx.stroke();
-        }
-      }
-      animRef.current = requestAnimationFrame(draw);
-    };
-    draw();
-    return () => cancelAnimationFrame(animRef.current);
-  }, [playing]);
-  return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
-}
-
-function AutumnCanvas({ playing }: { playing: boolean }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const animRef = useRef<number>(0);
-
-  useEffect(() => {
-    const canvas = canvasRef.current; if (!canvas) return;
-    const ctx = canvas.getContext("2d")!;
-    canvas.width = canvas.offsetWidth; canvas.height = canvas.offsetHeight;
-    const W = canvas.width, H = canvas.height;
-    const COLORS = ["#c0392b", "#e67e22", "#f0a500", "#d35400", "#a93226", "#ca6f1e", "#e74c3c"];
-    const leaves = Array.from({ length: 38 }, () => ({
-      x: Math.random() * W, y: Math.random() * H,
-      vx: (Math.random() - 0.5) * 1.2, vy: 0.6 + Math.random() * 1.4,
-      rot: Math.random() * Math.PI * 2, vr: (Math.random() - 0.5) * 0.04,
-      sz: 5 + Math.random() * 9, col: COLORS[Math.floor(Math.random() * COLORS.length)],
-      wob: Math.random() * Math.PI * 2, wobSpd: 0.015 + Math.random() * 0.02,
-    }));
-
-    function drawLeaf(x: number, y: number, sz: number, rot: number, col: string) {
-      ctx.save(); ctx.translate(x, y); ctx.rotate(rot);
-      ctx.beginPath();
-      ctx.moveTo(0, -sz);
-      ctx.bezierCurveTo(sz * 0.9, -sz * 0.55, sz * 0.85, sz * 0.45, 0, sz);
-      ctx.bezierCurveTo(-sz * 0.85, sz * 0.45, -sz * 0.9, -sz * 0.55, 0, -sz);
-      ctx.fillStyle = col; ctx.globalAlpha = 0.75; ctx.fill();
-      ctx.beginPath(); ctx.moveTo(0, -sz); ctx.lineTo(0, sz);
-      ctx.strokeStyle = "rgba(0,0,0,.15)"; ctx.lineWidth = 0.5; ctx.globalAlpha = 0.5; ctx.stroke();
-      ctx.restore();
-    }
-
-    const draw = () => {
-      ctx.clearRect(0, 0, W, H);
-      if (playing) {
-        leaves.forEach(l => {
-          l.wob += l.wobSpd; l.x += l.vx + Math.sin(l.wob) * 0.55; l.y += l.vy; l.rot += l.vr;
-          if (l.y > H + 15) { l.y = -15; l.x = Math.random() * W; }
-          if (l.x < -15 || l.x > W + 15) { l.x = Math.random() * W; l.y = -15; }
-          drawLeaf(l.x, l.y, l.sz, l.rot, l.col);
-        });
       }
       animRef.current = requestAnimationFrame(draw);
     };
@@ -718,15 +478,15 @@ function WindCanvas({ playing }: { playing: boolean }) {
 
 function getVisualizer(id: SoundId, isPlaying: boolean) {
   switch (id) {
-    case "rain": return <RainCanvas playing={isPlaying} />;
+    case "rain": return <YouTubeBackground videoId="xiMkVFLFFuk" />;
     case "thunder": return <ThunderCanvas playing={isPlaying} />;
     case "ocean": return <OceanCanvas playing={isPlaying} />;
     case "forest": return <ForestCanvas playing={isPlaying} />;
     case "bowl": return <BowlCanvas playing={isPlaying} />;
     case "noise": return <NoiseCanvas playing={isPlaying} />;
     case "brown": return <BrownCanvas playing={isPlaying} />;
-    case "fire": return <FireCanvas playing={isPlaying} />;
-    case "autumn": return <AutumnCanvas playing={isPlaying} />;
+    case "fire": return <YouTubeBackground videoId="SWswvjVxGWk" />;
+    case "autumn": return <YouTubeBackground videoId="XecvtTv1Hhs" />;
     case "wind": return <WindCanvas playing={isPlaying} />;
   }
 }
@@ -826,7 +586,7 @@ export default function AudioCalm() {
                 <>
                   <div className={`absolute inset-0 bg-gradient-to-b ${currentSound.color}`} />
                   <div className="absolute inset-0">{getVisualizer(currentSound.id, isPlaying)}</div>
-                  <div className="absolute inset-0 bg-black/30" />
+                  <div className="absolute inset-0 bg-black/20" />
                   <div className="relative z-10 flex flex-col min-h-[100dvh] px-6 pt-14 pb-10">
                     <div className="flex items-center justify-between">
                       <button onClick={handleBack} className="flex items-center gap-1.5 text-white/60 hover:text-white">
