@@ -17,7 +17,7 @@ interface Step {
 
 const STEPS: Step[] = [
   { type: "text", text: "The day is over.", sub: "Whatever happened… it's behind you now.", duration: 8000 },
-  { type: "breathe", duration: 9000 },
+  { type: "breathe", duration: 26000 },
   { type: "text", text: "Let your shoulders drop.", sub: "Let them feel heavy… and drop.", duration: 8000 },
   { type: "text", text: "Soften your jaw.", sub: "Around your eyes too… let it all soften.", duration: 8000 },
   { type: "text", text: "You did enough today.", sub: "You don't need to prove anything tonight.", duration: 8000 },
