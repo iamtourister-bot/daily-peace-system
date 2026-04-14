@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { useTheme } from "@/contexts/ThemeContext";
 import { useSession } from "@/contexts/SessionContext";
 import { Link, useLocation } from "wouter";
-import { Moon, Sun, ChevronRight } from "lucide-react";
+import { Moon, Sun, ChevronRight, Sunrise } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { PageTransition } from "@/components/PageTransition";
 
@@ -102,6 +102,8 @@ export default function Welcome() {
   const [selectedMood, setSelectedMood] = useState<string | null>(null);
   const [showAffirmation, setShowAffirmation] = useState(false);
 
+  const isMorning = timeOfDay === "morning";
+
   useEffect(() => {
     const saved = localStorage.getItem(MOOD_KEY);
     if (saved) {
@@ -117,7 +119,6 @@ export default function Welcome() {
     localStorage.setItem(MOOD_KEY, JSON.stringify({ date: getTodayKey(), mood }));
     setSelectedMood(mood);
     setCheckedIn(true);
-
     const historyKey = "reset_mood_history";
     const history = JSON.parse(localStorage.getItem(historyKey) || "[]");
     const today = getTodayKey();
@@ -262,13 +263,30 @@ export default function Welcome() {
                     </button>
                   )}
 
-                  {/* Affirmation card — optional, soft */}
+                  {/* Morning ritual — only in morning */}
+                  {isMorning && (
+                    <motion.button
+                      initial={{ opacity: 0, y: 8 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ delay: 0.4 }}
+                      onClick={() => setLocation("/morning-ritual")}
+                      className="mt-5 w-full text-left px-4 py-3 bg-amber-500/10 border border-amber-400/25 rounded-2xl backdrop-blur-sm hover:bg-amber-500/15 transition-colors flex items-center gap-3"
+                    >
+                      <Sunrise className="w-4 h-4 text-amber-300 shrink-0" />
+                      <div>
+                        <p className="text-amber-200/80 text-xs uppercase tracking-widest font-semibold">3 Minute Morning</p>
+                        <p className="text-white/60 text-sm">Start your day with intention</p>
+                      </div>
+                    </motion.button>
+                  )}
+
+                  {/* Affirmation card */}
                   <motion.button
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     transition={{ delay: 0.6 }}
                     onClick={() => setShowAffirmation(true)}
-                    className="mt-6 w-full text-left px-4 py-3 bg-white/8 border border-white/15 rounded-2xl backdrop-blur-sm hover:bg-white/12 transition-colors"
+                    className="mt-3 w-full text-left px-4 py-3 bg-white/8 border border-white/15 rounded-2xl backdrop-blur-sm hover:bg-white/12 transition-colors"
                   >
                     <p className="text-white/40 text-xs uppercase tracking-widest mb-1">A quiet note for today</p>
                     <p className="text-white/70 text-sm font-serif line-clamp-1">{daily.text}</p>
