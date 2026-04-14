@@ -30,7 +30,7 @@ const STEPS: Step[] = [
 export default function Night() {
   const [, setLocation] = useLocation();
   const [step, setStep] = useState(0);
-  const [breathPhase, setBreathPhase] = useState<"in" | "out">("in");
+  const [breathPhase, setBreathPhase] = useState<"in" | "out">("out");
   const [showOptions, setShowOptions] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const breathRef = useRef<ReturnType<typeof setInterval> | null>(null);
