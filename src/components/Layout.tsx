@@ -146,6 +146,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
               <div className="grid grid-cols-2 gap-2.5">
                 {[
                   { href: "/mood-history", icon: BarChart2, label: "My Week", sub: "Mood reflection" },
+                  { href: "/letter-to-self", icon: PenLine, label: "Letter to Myself", sub: "Future self" },
                   { href: "/techniques", icon: Brain, label: "5 Techniques", sub: "Science-backed" },
                   { href: "/speak", icon: Mic, label: "Speak & Release", sub: "Voice journal" },
                   { href: "/audio-calm", icon: VolumeX, label: "Sound Bath", sub: "10 ambient sounds" },
