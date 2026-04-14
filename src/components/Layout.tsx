@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Link, useLocation } from "wouter";
-import { Home, Heart, BookOpen, Menu, Moon, Sun, Mic, Info, VolumeX, AlertCircle, X, Leaf, Wind, Brain, BarChart2 } from "lucide-react";
+import { Home, Heart, BookOpen, Menu, Moon, Sun, Mic, Info, VolumeX, AlertCircle, X, Leaf, Wind, Brain, BarChart2, PenLine } from "lucide-react";
 import { useTheme } from "@/contexts/ThemeContext";
 import { motion, AnimatePresence } from "framer-motion";
 
