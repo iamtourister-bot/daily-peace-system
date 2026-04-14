@@ -30,7 +30,7 @@ const STORIES: Story[] = [
     duration: "6 min",
     emoji: "🌊",
     color: "from-blue-950 to-slate-700",
-    url: "/daily-peace-system/lighthouse-keeper.mp3",
+    url: "/daily-peace-system/__lighthouse-keeper.mp3.wav__",
   },
 ];
 
