@@ -23,6 +23,15 @@ const STORIES: Story[] = [
     color: "from-purple-900 to-violet-700",
     url: "/daily-peace-system/sleep well.MP3",
   },
+  {
+    id: "lighthouse",
+    title: "The Lighthouse Keeper",
+    description: "A quiet coast at night. The steady rhythm of waves and a turning light. Nothing is required of you.",
+    duration: "6 min",
+    emoji: "🌊",
+    color: "from-blue-950 to-slate-700",
+    url: "/daily-peace-system/lighthouse-keeper.mp3",
+  },
 ];
 
 export default function SleepStories() {
