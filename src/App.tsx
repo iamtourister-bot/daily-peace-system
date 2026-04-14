@@ -46,6 +46,7 @@ function AppRouter() {
         <Route path="/calming-room" component={CalmingRoom} />
         <Route path="/sleep-stories" component={SleepStories} />
         <Route path="/mood-history" component={MoodHistory} />
+        <Route path="/letter-to-self" component={LetterToSelf} />
         <Route component={NotFound} />
       </Switch>
     </Layout>
