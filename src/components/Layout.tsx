@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Link, useLocation } from "wouter";
-import { Home, Heart, BookOpen, Menu, Moon, Sun, Mic, Info, VolumeX, AlertCircle, X, Leaf, Wind, Brain } from "lucide-react";
+import { Home, Heart, BookOpen, Menu, Moon, Sun, Mic, Info, VolumeX, AlertCircle, X, Leaf, Wind, Brain, BarChart2 } from "lucide-react";
 import { useTheme } from "@/contexts/ThemeContext";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -145,9 +145,10 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
               <div className="grid grid-cols-2 gap-2.5">
                 {[
+                  { href: "/mood-history", icon: BarChart2, label: "My Week", sub: "Mood reflection" },
                   { href: "/techniques", icon: Brain, label: "5 Techniques", sub: "Science-backed" },
                   { href: "/speak", icon: Mic, label: "Speak & Release", sub: "Voice journal" },
-                  { href: "/audio-calm", icon: VolumeX, label: "Sound Bath", sub: "5 ambient sounds" },
+                  { href: "/audio-calm", icon: VolumeX, label: "Sound Bath", sub: "10 ambient sounds" },
                   { href: "/calming-room", icon: Wind, label: "Calming Room", sub: "Sounds for peace" },
                   { href: "/sleep-stories", icon: Moon, label: "Sleep Stories", sub: "Drift into sleep" },
                   { href: "/night", icon: Moon, label: "Night System", sub: "Wind down" },
