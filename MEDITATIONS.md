@@ -1,208 +1,370 @@
-Here are all 5 clean scripts ready to paste into Oracle Artisan:
+Writing all 5 now. Taking my time to make each one feel completely different. 💚
 
 ---
 
 ## 🌅 1. Morning Clarity
-**Background:** Soft birdsong, morning breeze
+**Duration:** 8 minutes | **Background sound:** Soft birdsong, gentle morning breeze
+**Technique:** Intention setting + mindful breathing
 
-Sit comfortably. Or lie down. Whatever feels right.
+---
 
-Take one breath in and let it go.
+*Find a comfortable position. You can sit or lie down — whatever feels right for this morning.*
 
-Your body has been breathing all night without you. That is where we start. With what is already working.
+*Close your eyes if that feels comfortable. Or let your gaze soften toward the floor.*
 
-Breathe in slowly and out.
+*Take one breath in through your nose… and let it go.*
 
-This moment is yours. Before the noise. Before anything is asked of you.
+*You don't need to breathe in any special way. Just notice that you are breathing. That your body has been doing this all night, without you asking.*
 
-As you breathe think of one word. How do you want to feel today.
+*That's where we begin. With what's already working.*
 
-Let it come. Don't force it.
+*Now bring your attention to this moment. Not to what happened yesterday. Not to what's coming today. Just here. Just this breath.*
 
-Breathe that word in. As if the air carries it into you.
+*Breathe in… slowly… and out.*
 
-Breathe in what you want to carry today. And breathe out what you don't.
+*Your morning is yours. Before the noise. Before the demands. This moment belongs only to you.*
 
-Again. Once more.
+*As you breathe, I want you to think of one word. Just one. A word that describes how you want to feel today.*
 
-You have set your direction. Not a list. Not a pressure. Just a quiet compass.
+*It might be calm. It might be clear. It might be strong, or gentle, or open.*
 
-One final breath in and release.
+*Don't force it. Let it come.*
 
-Open your eyes when you're ready. Your day has begun. And you began it with intention.
+*Hold that word quietly in your mind.*
+
+*Now breathe it in. As if the air itself carries that quality into your body.*
+
+*Breathe in your word… and breathe out anything that isn't it.*
+
+*Again. Breathe in what you want to carry today… and release what you don't.*
+
+*Once more.*
+
+*You have set your direction for the day. Not a to-do list. Not a pressure. Just a quiet intention — a compass pointing toward how you want to feel.*
+
+*You will get pulled away from it. That's okay. You can always come back.*
+
+*Take one final deep breath in… hold it gently… and release.*
+
+*Open your eyes slowly.*
+
+*Your morning has begun. And you began it with intention.*
+
+*That already matters.*
 
 ---
 
 ## 😰 2. Anxiety Relief
-**Background:** Soft steady rain
+**Duration:** 10 minutes | **Background sound:** Soft rain, low and steady
+**Technique:** Box breathing + grounding + body scan
 
-You're here. That took something.
+---
 
-Whatever you're feeling in your body right now — the tightness, the racing — that's okay. Your body is reacting. That's all.
+*You're here. That took courage.*
 
-Right now there is no threat. There is only this.
+*Whatever is happening in your body right now — the tightness, the racing, the noise — I want you to know: you are safe in this moment. Your body is doing what bodies do when they feel threatened. But right now, there is no threat. There is only this.*
 
-Let's start with your breath.
+*Let's start with your breath. Because your breath is the fastest way to tell your nervous system that it's okay to stand down.*
 
-Breathe in two three four. Hold two three four. Out two three four. Hold two three four.
+*Breathe in slowly… counting in your mind: one, two, three, four.*
 
-Again. In two three four. Hold two three four. Out two three four. Hold two three four.
+*Hold. One, two, three, four.*
 
-Once more.
+*Breathe out. One, two, three, four.*
 
-Good. Your nervous system heard that.
+*Hold. One, two, three, four.*
 
-Now notice five things you can physically feel.
+*Again. Breathe in… two, three, four.*
 
-The weight of your body.
+*Hold… two, three, four.*
 
-The temperature of the air.
+*Out… two, three, four.*
 
-Your clothes against your skin.
+*Hold… two, three, four.*
 
-Your feet on the floor.
+*One more time.*
 
-Your hands. Open them slightly. Let them rest.
+*In… two, three, four.*
 
-You're back in your body.
+*Hold… two, three, four.*
 
-Anxiety lives in the future. But you are not in the future. You are here.
+*Out… two, three, four.*
 
-Scan slowly downward.
+*Hold… two, three, four.*
 
-Forehead soften. Jaw release. Shoulders drop. Chest breathe into it. Hands open.
+*Good. Your nervous system heard that.*
 
-This calm is real. It belongs to you.
+*Now let's bring you back into your body. I'm going to ask you to notice five things you can feel physically. Right now.*
 
-One slow breath in and out.
+*The weight of your body where you're sitting or lying.*
 
-You are okay. Right now. You are okay.
+*The temperature of the air on your skin.*
+
+*The feeling of your clothes against your body.*
+
+*The pressure of your feet on the floor, or your back against the surface beneath you.*
+
+*And your hands. Notice your hands. Are they tense? Open them slightly. Let them rest.*
+
+*You are here. You are physical. You are present.*
+
+*Anxiety lives in the future. But you are not in the future. You are here.*
+
+*Now slowly scan your body from the top of your head downward.*
+
+*Notice your forehead. Is it tight? Let it soften.*
+
+*Your jaw. Unclench it gently.*
+
+*Your shoulders. Let them drop just a little.*
+
+*Your chest. It may feel tight. That's okay. Just breathe into it.*
+
+*Your stomach. Let it be soft.*
+
+*Your hands again. Open. Resting.*
+
+*You have just moved from anxiety's grip… into your own body.*
+
+*This is yours. This calm is real.*
+
+*Take one slow breath in… and let it go.*
+
+*You are okay. Right now, in this moment, you are okay.*
 
 ---
 
 ## 🌙 3. Sleep Preparation
-**Background:** Deep ocean waves, very low
+**Duration:** 12 minutes | **Background sound:** Deep ocean waves, very low
+**Technique:** Yoga Nidra style — progressive body dissolution
 
-It's time to let the day go.
+---
 
-All of it.
+*It's time to let the day go.*
 
-Lie down. Let the surface beneath you hold everything. You don't need to hold yourself up anymore.
+*All of it. Everything that happened. Everything that didn't. Everything you said, everything you didn't say. Everything that's waiting for tomorrow.*
 
-Close your eyes.
+*None of it belongs here.*
 
-Breathe in slowly and release.
+*Lie down if you haven't already. Let your body be fully supported. You don't need to hold yourself up. The surface beneath you has you completely.*
 
-Again.
+*Close your eyes.*
 
-Let your breathing find its own rhythm now. You don't need to control it.
+*Take a breath in through your nose… slow… deep… and release it.*
 
-I'm going to move through your body. Just notice each part as I name it. Nothing else.
+*Again.*
 
-Your feet. Heavy.
+*And one more time.*
 
-Your legs. Sinking.
+*Now let your breathing return to its natural rhythm. You don't need to control it anymore. Just let it happen.*
 
-Your lower back. Releasing.
+*I'm going to guide your attention through your body. As I name each part, simply bring your awareness there. You don't need to do anything. Just notice.*
 
-Your stomach. Soft.
+*Your right foot. Your toes. The sole of your foot. Your heel.*
 
-Your chest. Rising and falling.
+*Your right leg. The back of your calf. Your knee. Your thigh.*
 
-Your hands. Open.
+*Your left foot. Your toes. The sole. The heel.*
 
-Your arms. Heavy.
+*Your left leg. The calf. The knee. The thigh.*
 
-Your shoulders. Melting.
+*Both legs now, heavy and warm. Sinking.*
 
-Your jaw. Releasing.
+*Your lower back. Releasing into the surface beneath you.*
 
-Your eyes. Still.
+*Your stomach. Rising and falling with each breath. Soft.*
 
-Your whole body. Held.
+*Your chest. Each breath slower than the last.*
 
-There is nothing to do. Nowhere to go. Nothing to solve tonight.
+*Your right hand. Your fingers. Your palm. Your wrist.*
 
-Let my voice grow quieter now.
+*Your right arm. Heavy.*
 
-Sleep is very close.
+*Your left hand. Your fingers. Your palm.*
 
-You don't need to follow my voice anymore.
+*Your left arm. Heavy.*
 
-Let go.
+*Your shoulders. Melting downward.*
+
+*Your neck. Long and soft.*
+
+*Your face. Your jaw releasing. Your cheeks softening. Your eyes still behind closed lids.*
+
+*Your forehead. Smooth.*
+
+*Your whole body now. Heavy. Warm. Held.*
+
+*There is nothing to do. Nowhere to go. Nothing to solve.*
+
+*The night is taking care of everything outside.*
+
+*Your body is taking care of everything inside.*
+
+*You only need to drift.*
+
+*Let the sounds around you become part of your rest.*
+
+*Let my voice become quieter now… and quieter…*
+
+*You are almost there.*
+
+*Sleep is very close.*
+
+*Let it come.*
 
 ---
 
 ## 💪 4. Body Release
-**Background:** Soft forest, distant stream
+**Duration:** 8 minutes | **Background sound:** Soft forest, distant stream
+**Technique:** Progressive muscle relaxation — tense and release
 
-Tension stays in the body long after the mind moves on. We're going to find it. And release it.
+---
 
-Get comfortable. Spine supported.
+*Tension lives in the body long after the mind has moved on.*
 
-Take a slow breath in and out.
+*We're going to find it. And we're going to let it go.*
 
-For each part of the body gently tense and hold then release completely. The release is where everything changes.
+*Sit or lie in a comfortable position. Make sure your spine is supported.*
 
-Your feet. Curl your toes gently. Hold. Release. Feel the difference.
+*Take a slow breath in… and out.*
 
-Your legs. Squeeze your thighs. Hold. Let go. Heavy.
+*We're going to work through your body in sections. For each one, I'll ask you to gently tense the muscles… hold for a few seconds… and then release completely.*
 
-Your stomach. Tighten gently. Hold. Soft. Completely soft.
+*The release is where the healing happens. Not the tension. The letting go.*
 
-Your hands. A gentle fist. Hold. Open. Feel the warmth.
+*Let's begin.*
 
-Your shoulders. Draw them up. Hold. Feel everything stored there. Drop.
+*Bring your attention to your feet. Curl your toes gently inward. Feel the tension in your feet and calves.*
 
-Notice how far they fell. That was tension you were carrying.
+*Hold it… hold…*
 
-Your face. Scrunch gently. Hold. Release. Soft jaw. Soft eyes.
+*And release. Let your feet fall open. Feel the difference.*
 
-Take a breath and notice your body now.
+*Now your legs. Squeeze your thigh muscles. Press them together slightly.*
 
-Different.
+*Hold… feel the tension…*
 
-One final breath in and out through the mouth.
+*Release. Let them go completely heavy.*
 
-You have released what your body was holding. Carry this lightness.
+*Your stomach now. Tighten your core gently. Hold.*
+
+*And release. Let your belly be completely soft.*
+
+*Your hands. Make a gentle fist. Squeeze.*
+
+*Hold…*
+
+*Open your hands. Let your fingers spread. Feel the warmth.*
+
+*Your arms. Tense your biceps. Hold.*
+
+*Release. Heavy arms. Resting.*
+
+*Your shoulders. Draw them up toward your ears.*
+
+*Hold… feel all the tension that lives there…*
+
+*And drop. Let them fall completely. Feel how far they dropped.*
+
+*That is how much tension you were carrying.*
+
+*Your face now. Scrunch your whole face gently. Eyes, nose, jaw.*
+
+*Hold…*
+
+*And release. Let your face go completely slack. Soft jaw. Soft eyes.*
+
+*Now your whole body at once. Take a breath in and notice how different you feel.*
+
+*The tension that was there… is less.*
+
+*Your body remembers what release feels like now.*
+
+*Take one final breath. In through the nose… long and slow… and out through the mouth.*
+
+*You have released what your body was holding.*
+
+*Carry this lightness with you.*
 
 ---
 
 ## 🕊️ 5. Inner Peace
-**Background:** Singing bowls, very soft
-
-There is a place inside you that stress cannot reach. It has always been there. We are going to visit it now.
-
-Close your eyes. Breathe in and out.
-
-Imagine a place that feels completely safe. Real or imagined. It doesn't matter.
-
-Let it come to you.
-
-Where are you.
-
-Look around slowly. What do you see.
-
-What do you hear.
-
-Feel the air on your skin.
-
-Take a breath here. What does it smell like.
-
-Find somewhere to rest in this place.
-
-Nothing is required of you here. No explaining. No performing. Just existing. Fully.
-
-This is your center. Not something you create. Something you return to.
-
-You can come back here any time. One breath. Eyes closed. And you are here.
-
-Take that breath now. In. And out.
-
-You found it. It was always yours.
+**Duration:** 10 minutes | **Background sound:** Singing bowls, very soft
+**Technique:** Guided visualization — safe place imagery
 
 ---
 
-All 5 clean and ready. 💚
+*There is a place inside you that anxiety cannot reach.*
 
-Record them when your quota resets and come back with the durations. Then we add them to the app! 👇
+*Stress cannot find it. Worry does not know the way.*
+
+*It has always been there. We are going to visit it now.*
+
+*Close your eyes. Take a slow breath in… and out.*
+
+*I want you to imagine a place. It can be real or imagined. Somewhere that feels completely safe. Completely peaceful.*
+
+*It might be a place from your childhood. A place in nature. A place you've never been but always imagined.*
+
+*Let it come to you. Don't force it. Just allow an image to form.*
+
+*Where are you?*
+
+*Look around slowly. What do you see?*
+
+*Notice the light. Is it warm or cool? Bright or soft?*
+
+*Look down. What is beneath your feet?*
+
+*Notice the sounds of this place. What do you hear?*
+
+*Feel the air on your skin. Is it warm? Is there a gentle breeze?*
+
+*Take a breath in this place. What does the air smell like?*
+
+*This place is yours. No one else is here unless you want them to be. Nothing is required of you here. You don't need to perform or explain or apologize.*
+
+*You simply exist here. Fully. Peacefully.*
+
+*Find somewhere comfortable to rest in this place. Sit or lie down.*
+
+*Feel the ground or surface supporting you completely.*
+
+*As you rest here, notice how your body feels. Notice how your mind begins to quiet.*
+
+*This is your center. This stillness.*
+
+*It isn't something you have to create. It's something you return to.*
+
+*Breathe.*
+
+*Stay here as long as you need.*
+
+*Know that you can come back to this place any time. In a busy room. In a difficult moment. In the middle of a hard day.*
+
+*Close your eyes, take one breath, and you are here.*
+
+*Take that breath now.*
+
+*In…*
+
+*And out.*
+
+*You have found your still point.*
+
+*It was always there.*
+
+*It was always yours.*
+
+---
+
+All 5 are ready. 💚
+
+**Next steps:**
+1. Share with your expert for review
+2. Once approved — create `MEDITATIONS.md` on GitHub to save them
+3. Record all 5 with Aoede in Oracle Artisan
+4. Add background sounds
+5. Upload and add to app
+
+👇
