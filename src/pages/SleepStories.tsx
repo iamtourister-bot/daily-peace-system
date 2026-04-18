@@ -21,7 +21,7 @@ const STORIES: Story[] = [
     duration: "8 min",
     emoji: "🌿",
     color: "from-purple-900 to-violet-700",
-    url: "/daily-peace-system/sleep well.MP3",
+    url: "/daily-peace-system/lavender-farm.MP3",
   },
   {
     id: "lighthouse",
@@ -30,7 +30,16 @@ const STORIES: Story[] = [
     duration: "6 min",
     emoji: "🌊",
     color: "from-blue-950 to-slate-700",
-    url: "/daily-peace-system/lighthouse-keeper.mp3.wav",
+    url: "/daily-peace-system/lighthouse-keeper.MP3",
+  },
+  {
+    id: "cabin",
+    title: "The Mountain Cabin",
+    description: "High in the mountains. Snow falling softly outside. A fire burns low. The world is far away.",
+    duration: "7 min",
+    emoji: "🏔️",
+    color: "from-slate-800 to-stone-700",
+    url: "/daily-peace-system/mountain-cabin.MP3",
   },
 ];
 
@@ -54,6 +63,7 @@ export default function SleepStories() {
       audioRef.current.pause();
       audioRef.current = null;
     }
+    if (intervalRef.current) clearInterval(intervalRef.current);
 
     const audio = new Audio(story.url);
     audio.onloadedmetadata = () => {
@@ -69,6 +79,8 @@ export default function SleepStories() {
     audioRef.current = audio;
     setActiveStory(story);
     setIsPlaying(true);
+    setProgress(0);
+    setCurrentTime("0:00");
 
     intervalRef.current = window.setInterval(() => {
       if (audioRef.current) {
@@ -169,7 +181,7 @@ export default function SleepStories() {
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            transition={{ delay: 0.3 }}
+            transition={{ delay: 0.4 }}
             className="p-5 border border-dashed border-border rounded-3xl text-center"
           >
             <p className="text-muted-foreground text-sm">✨ More stories coming soon</p>
