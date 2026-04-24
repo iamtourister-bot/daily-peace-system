@@ -1,8 +1,165 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useLocation } from "wouter";
 import { motion, AnimatePresence } from "framer-motion";
 import { PageTransition } from "@/components/PageTransition";
-import { Play, X, ChevronRight, ArrowLeft, Volume2 } from "lucide-react";
+import { Play, Pause, X, ChevronRight, ArrowLeft, Volume2 } from "lucide-react";
+
+// ── CANVAS VISUALIZERS ──────────────────────────────────────────────────────
+
+function RisingParticles({ color = "255,200,80" }: { color?: string }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const animRef = useRef<number>(0);
+  useEffect(() => {
+    const canvas = canvasRef.current; if (!canvas) return;
+    const ctx = canvas.getContext("2d")!;
+    canvas.width = canvas.offsetWidth; canvas.height = canvas.offsetHeight;
+    const W = canvas.width, H = canvas.height;
+    const particles = Array.from({ length: 60 }, () => ({
+      x: Math.random() * W, y: H + Math.random() * H,
+      r: 0.5 + Math.random() * 2.5, speed: 0.3 + Math.random() * 0.8,
+      alpha: 0.1 + Math.random() * 0.5, drift: (Math.random() - 0.5) * 0.4,
+    }));
+    const draw = () => {
+      ctx.clearRect(0, 0, W, H);
+      particles.forEach(p => {
+        p.y -= p.speed; p.x += p.drift;
+        if (p.y < -10) { p.y = H + 10; p.x = Math.random() * W; }
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${color},${p.alpha})`; ctx.fill();
+      });
+      animRef.current = requestAnimationFrame(draw);
+    };
+    draw();
+    return () => cancelAnimationFrame(animRef.current);
+  }, []);
+  return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
+}
+
+function RippleWaves({ color = "100,180,255" }: { color?: string }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const animRef = useRef<number>(0);
+  useEffect(() => {
+    const canvas = canvasRef.current; if (!canvas) return;
+    const ctx = canvas.getContext("2d")!;
+    canvas.width = canvas.offsetWidth; canvas.height = canvas.offsetHeight;
+    const W = canvas.width, H = canvas.height;
+    const cx = W / 2, cy = H / 2;
+    const rings = Array.from({ length: 5 }, (_, i) => ({ r: i * 60, alpha: 0.3, speed: 0.4 }));
+    const draw = () => {
+      ctx.clearRect(0, 0, W, H);
+      rings.forEach(ring => {
+        ring.r += ring.speed;
+        if (ring.r > Math.max(W, H)) ring.r = 0;
+        const alpha = Math.max(0, 0.3 * (1 - ring.r / Math.max(W, H)));
+        ctx.beginPath(); ctx.arc(cx, cy, ring.r, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(${color},${alpha})`; ctx.lineWidth = 1.5; ctx.stroke();
+      });
+      animRef.current = requestAnimationFrame(draw);
+    };
+    draw();
+    return () => cancelAnimationFrame(animRef.current);
+  }, []);
+  return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
+}
+
+function FallingParticles() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const animRef = useRef<number>(0);
+  useEffect(() => {
+    const canvas = canvasRef.current; if (!canvas) return;
+    const ctx = canvas.getContext("2d")!;
+    canvas.width = canvas.offsetWidth; canvas.height = canvas.offsetHeight;
+    const W = canvas.width, H = canvas.height;
+    const particles = Array.from({ length: 50 }, () => ({
+      x: Math.random() * W, y: Math.random() * H,
+      r: 0.5 + Math.random() * 2, speed: 0.15 + Math.random() * 0.4,
+      alpha: 0.1 + Math.random() * 0.4, drift: (Math.random() - 0.5) * 0.2,
+    }));
+    const draw = () => {
+      ctx.clearRect(0, 0, W, H);
+      particles.forEach(p => {
+        p.y += p.speed; p.x += p.drift;
+        if (p.y > H + 10) { p.y = -10; p.x = Math.random() * W; }
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(220,230,255,${p.alpha})`; ctx.fill();
+      });
+      animRef.current = requestAnimationFrame(draw);
+    };
+    draw();
+    return () => cancelAnimationFrame(animRef.current);
+  }, []);
+  return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
+}
+
+function PulseRings({ color = "180,140,255" }: { color?: string }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const animRef = useRef<number>(0);
+  useEffect(() => {
+    const canvas = canvasRef.current; if (!canvas) return;
+    const ctx = canvas.getContext("2d")!;
+    canvas.width = canvas.offsetWidth; canvas.height = canvas.offsetHeight;
+    const W = canvas.width, H = canvas.height;
+    const cx = W / 2, cy = H / 2;
+    let t = 0;
+    const draw = () => {
+      ctx.clearRect(0, 0, W, H);
+      t += 0.012;
+      for (let i = 0; i < 4; i++) {
+        const phase = t + i * (Math.PI / 2);
+        const r = 30 + Math.abs(Math.sin(phase)) * 120;
+        const alpha = 0.25 * Math.abs(Math.sin(phase));
+        ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(${color},${alpha})`; ctx.lineWidth = 2; ctx.stroke();
+      }
+      animRef.current = requestAnimationFrame(draw);
+    };
+    draw();
+    return () => cancelAnimationFrame(animRef.current);
+  }, []);
+  return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
+}
+
+function AuroraShift() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const animRef = useRef<number>(0);
+  useEffect(() => {
+    const canvas = canvasRef.current; if (!canvas) return;
+    const ctx = canvas.getContext("2d")!;
+    canvas.width = canvas.offsetWidth; canvas.height = canvas.offsetHeight;
+    const W = canvas.width, H = canvas.height;
+    let t = 0;
+    const draw = () => {
+      ctx.clearRect(0, 0, W, H);
+      t += 0.005;
+      const colors = [
+        `rgba(80,120,255,${0.12 + Math.sin(t) * 0.06})`,
+        `rgba(100,200,180,${0.10 + Math.sin(t + 1) * 0.05})`,
+        `rgba(180,80,200,${0.08 + Math.sin(t + 2) * 0.04})`,
+      ];
+      colors.forEach((c, i) => {
+        const x = W * (0.2 + i * 0.3 + Math.sin(t + i) * 0.1);
+        const grad = ctx.createRadialGradient(x, H * 0.4, 0, x, H * 0.4, H * 0.6);
+        grad.addColorStop(0, c); grad.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
+      });
+      animRef.current = requestAnimationFrame(draw);
+    };
+    draw();
+    return () => cancelAnimationFrame(animRef.current);
+  }, []);
+  return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />;
+}
+
+function getVisualizer(id: string) {
+  switch (id) {
+    case "morning": return <RisingParticles color="255,200,80" />;
+    case "anxiety": return <RippleWaves color="100,180,255" />;
+    case "sleep": return <FallingParticles />;
+    case "body": return <PulseRings color="180,140,255" />;
+    case "peace": return <AuroraShift />;
+    default: return null;
+  }
+}
 
 const NATURE_IMAGES = {
   forest: "https://images.unsplash.com/photo-1448375240586-882707db888b?w=800&auto=format&fit=crop&q=80",
@@ -140,6 +297,7 @@ export default function Meditations() {
   const [stepIndex, setStepIndex] = useState(0);
   const [done, setDone] = useState(false);
   const [postFeeling, setPostFeeling] = useState<string | null>(null);
+  const [audioPaused, setAudioPaused] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
@@ -157,6 +315,17 @@ export default function Meditations() {
     setStepIndex(0);
     setDone(false);
     setPostFeeling(null);
+  };
+
+  const toggleAudio = () => {
+    if (!audioRef.current) return;
+    if (audioPaused) {
+      audioRef.current.play();
+      setAudioPaused(false);
+    } else {
+      audioRef.current.pause();
+      setAudioPaused(true);
+    }
   };
 
   const beginPlaying = () => {
@@ -194,6 +363,7 @@ export default function Meditations() {
     setStepIndex(0);
     setDone(false);
     setPostFeeling(null);
+    setAudioPaused(false);
   };
 
   if (selected && playing) {
@@ -201,7 +371,13 @@ export default function Meditations() {
       <div className="flex flex-col min-h-[100dvh] relative overflow-hidden">
         <div className="absolute inset-0 bg-cover bg-center" style={{ backgroundImage: `url(${selected.image})` }} />
         <div className="absolute inset-0 bg-black/65" />
-        <div className="absolute inset-0 flex items-center justify-center z-0">
+        {/* Canvas visualizer */}
+        <div className="absolute inset-0 z-0">
+          {getVisualizer(selected.id)}
+        </div>
+
+        {/* Breathing circle */}
+        <div className="absolute inset-0 flex items-center justify-center z-1">
           <motion.div
             animate={{ scale: [1, 1.25, 1] }}
             transition={{ duration: 5, repeat: Infinity, ease: "easeInOut" }}
@@ -228,8 +404,20 @@ export default function Meditations() {
         <div className="flex-1 flex flex-col items-center justify-center p-8 relative z-10">
           {selected.audioUrl ? (
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-center">
-              <p className="text-white/50 text-sm uppercase tracking-widest mb-4">{selected.title}</p>
-              <p className="text-white/30 text-sm mt-8">Close your eyes and listen</p>
+              <p className="text-white/50 text-sm uppercase tracking-widest mb-12">{selected.title}</p>
+              <motion.button
+                onClick={toggleAudio}
+                whileTap={{ scale: 0.95 }}
+                className="w-20 h-20 rounded-full bg-white/10 border border-white/25 flex items-center justify-center mx-auto mb-8 hover:bg-white/20 transition-colors"
+              >
+                {audioPaused
+                  ? <Play className="w-8 h-8 text-white ml-1" />
+                  : <Pause className="w-8 h-8 text-white" />
+                }
+              </motion.button>
+              <p className="text-white/30 text-sm">
+                {audioPaused ? "Tap to resume" : "Close your eyes and listen"}
+              </p>
             </motion.div>
           ) : (
             <AnimatePresence mode="wait">
