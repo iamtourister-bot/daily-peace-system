@@ -36,7 +36,7 @@ const MEDITATIONS: Meditation[] = [
     image: NATURE_IMAGES.sunrise,
     tag: "Morning",
     intro: "A gentle way to open the day. Let the night release from your body.",
-    audioUrl: "/daily-peace-system/morning-clarity.mp3",
+    audioUrl: "/daily-peace-system/morning-clarity.MP3",
     steps: [
       { text: "Get comfortable. Clear your mind and follow each instruction as it appears.", duration: 5000 },
       { text: "Take a slow breath in... and let it go.", duration: 10000 },
@@ -54,7 +54,7 @@ const MEDITATIONS: Meditation[] = [
     image: NATURE_IMAGES.ocean,
     tag: "Anxiety",
     intro: "When your mind is racing, this session helps you return to your body.",
-    audioUrl: "/daily-peace-system/anxiety-relief.mp3",
+    audioUrl: "/daily-peace-system/anxiety-relief.MP3",
     steps: [
       { text: "Get comfortable. Clear your mind and follow each instruction as it appears.", duration: 5000 },
       { text: "Place both feet on the floor. Feel the ground holding you.", duration: 12000 },
