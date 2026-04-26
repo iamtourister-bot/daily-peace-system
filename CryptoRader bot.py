@@ -1,0 +1,3233 @@
+# CryptoRadar Bot v4.1 — Dual Brain Integration
+# ============================================================
+# WHAT'S NEW vs v4.0:
+# 1. /brain endpoint — exposes Bot1's hour_stats and coin win rates to Sentinel
+# 2. Sentinel regime sync — reads Sentinel's /regime instead of own calculation
+#    (single source of truth — one brain, not two)
+# 3. Fill notification — when limit order fills, instantly tells Sentinel /filled
+#    (no more 15-min polling delay — Sentinel knows exact fill price immediately)
+# 4. Outcome includes limit_entry — Sentinel's entry learning now gets accurate
+#    fill distance data (was sending wrong entry before)
+# 5. Sentinel weight reading — before scoring, Bot1 checks which checks Sentinel
+#    trusts and adjusts its own min score requirements accordingly
+# 6. Sentinel knowledge boost preserved and improved from v4.0
+# ============================================================
+
+import requests
+import time
+import logging
+import json
+import os
+import threading
+from datetime import datetime, timezone, timedelta
+from flask import Flask, jsonify
+
+# ============================================================
+# API KEYS
+# ============================================================
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
+CMC_API_KEY      = os.getenv("CMC_API_KEY", "")
+BYBIT_API_KEY    = os.getenv("BYBIT_API_KEY", "")
+BYBIT_SECRET     = os.getenv("BYBIT_SECRET", "")
+
+# ============================================================
+# SETTINGS
+# ============================================================
+SCAN_INTERVAL_SECONDS    = 900
+TRACK_INTERVAL_SECONDS   = 60
+DAILY_REPORT_HOUR_UTC    = 7
+CMC_TOP_COINS            = 50
+MIN_24H_VOLUME_USD       = 10_000_000
+MIN_MARKET_CAP_USD       = 50_000_000
+MIN_OPPORTUNITY_SCORE    = 6
+MIN_SIGNALS_REQUIRED     = 3
+MIN_RISK_REWARD          = 2.0
+RSI_OVERSOLD_LEVEL       = 40
+RSI_OVERBOUGHT_LEVEL     = 65
+VOLUME_SPIKE_RATIO       = 1.5
+ATR_SL_MULTIPLIER        = 2.0
+ATR_TRAIL_MULTIPLIER     = 1.5
+STABLECOINS = {"USDT","USDC","BUSD","DAI","TUSD","FDUSD","USDP","USDD","USD1"}
+
+STARTING_BALANCE         = 1000.0
+MIN_TRADE_PCT            = 0.03
+MAX_TRADE_PCT            = 0.08
+MIN_TRADE_SIZE           = 20.0
+MAX_TRADE_SIZE           = 150.0
+PORTFOLIO_HEAT_CAP       = 0.80
+DAILY_DRAWDOWN_LIMIT     = 0.05
+STALE_TRADE_HOURS        = 48
+CORRELATION_CAP          = 5
+MIN_WIN_RATE_TO_ENTER    = 0.40
+PARTIAL_TP_PERCENT       = 0.50
+
+BULL_MAX_LONGS           = 16
+BULL_MAX_SHORTS          = 4
+BEAR_MAX_LONGS           = 4
+BEAR_MAX_SHORTS          = 16
+SIDEWAYS_MAX_LONGS       = 10
+SIDEWAYS_MAX_SHORTS      = 10
+
+BRAIN_EXPLORE_PHASE      = 20
+BRAIN_ADAPT_PHASE        = 50
+
+COIN_COOLDOWN_SECONDS    = 3600
+TRADE_DEDUP_SECONDS      = 3600
+SIDEWAYS_SCORE_BOOST     = 2
+MAX_TRADES_PER_SCAN      = 3
+CIRCUIT_BREAKER_LOSSES   = 999
+CIRCUIT_BREAKER_MINUTES  = 120
+
+BINANCE_FUTURES_BASE     = "https://fapi.binance.com"
+FEAR_GREED_URL           = "https://api.alternative.me/fng/?limit=1"
+INTEL_CACHE_SECONDS      = 300
+
+SENTINEL_URL             = "https://cryptoradar2-production.up.railway.app/analyse"
+SENTINEL_TIMEOUT         = 55
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+
+# ============================================================
+# FLASK ENDPOINTS
+# ============================================================
+@app.route("/")
+def health():
+    return "CryptoRadar v4.1 running", 200
+
+@app.route("/trades", methods=["GET"])
+def get_open_trades():
+    trades = [s for s in open_signals if s["status"] == "open"]
+    return jsonify({"trades": trades, "count": len(trades)})
+
+@app.route("/brain", methods=["GET"])
+def get_brain_endpoint():
+    """
+    NEW v4.1: Exposes Bot1's learned intelligence to Sentinel.
+    Sentinel reads this every time it runs a verdict to apply timing boosts.
+    hour_stats tells Sentinel which UTC hours this bot wins most — powerful signal.
+    """
+    return jsonify({
+        "hour_stats":   brain.get("hour_stats", {}),
+        "coin_stats":   {sym: {
+            "wins":         cs.get("wins", 0),
+            "losses":       cs.get("losses", 0),
+            "long_wins":    cs.get("long_wins", 0),
+            "long_losses":  cs.get("long_losses", 0),
+            "short_wins":   cs.get("short_wins", 0),
+            "short_losses": cs.get("short_losses", 0),
+            "total_pnl":    cs.get("total_pnl", 0)
+        } for sym, cs in brain.get("coin_stats", {}).items()},
+        "total_closed": brain.get("total_closed", 0),
+        "long_wins":    brain.get("long_wins", 0),
+        "short_wins":   brain.get("short_wins", 0),
+        "long_closed":  brain.get("long_closed", 0),
+        "short_closed": brain.get("short_closed", 0),
+        "streak":       brain.get("streak", 0),
+        "rsi_oversold": brain.get("rsi_oversold", RSI_OVERSOLD_LEVEL),
+        "volume_spike": brain.get("volume_spike", VOLUME_SPIKE_RATIO)
+    })
+
+@app.route("/trail", methods=["POST"])
+def activate_trail():
+    from flask import request as req
+    global open_signals
+    activated = []
+    for sig in open_signals:
+        if sig["status"] != "open": continue
+        direction = sig.get("direction", "long")
+        entry     = sig["entry"]
+        atr       = sig.get("atr", 0)
+        price = get_current_price(sig["symbol"])
+        if not price: continue
+        if direction == "long":
+            pnl_pct = ((price - entry) / entry) * 100
+        else:
+            pnl_pct = ((entry - price) / entry) * 100
+        if pnl_pct > 0.3:
+            floor_pct = pnl_pct * 0.5
+            if direction == "long":
+                new_sl = entry * (1 + floor_pct/100)
+                if atr > 0: new_sl = max(new_sl, price - atr * 1.5)
+                if new_sl > sig["sl"]:
+                    sig["sl"] = round(new_sl, 6)
+                    activated.append(sig["symbol"])
+            else:
+                new_sl = entry * (1 - floor_pct/100)
+                if atr > 0: new_sl = min(new_sl, price + atr * 1.5)
+                if new_sl < sig["sl"]:
+                    sig["sl"] = round(new_sl, 6)
+                    activated.append(sig["symbol"])
+    if activated:
+        save_json_data("open_signals.json", open_signals)
+        logger.info("TRAIL activated by Sentinel: " + str(activated))
+        broadcast("🔒 <b>Sentinel activated trailing stops</b>" + chr(10) +
+                  "Market reversal detected — protecting profits on: " + ", ".join(activated))
+    return jsonify({"activated": activated, "count": len(activated)})
+
+@app.route("/close/<symbol>", methods=["POST"])
+def force_close(symbol):
+    global open_signals, portfolio
+    symbol = symbol.upper()
+    closed = False
+    for sig in open_signals:
+        if sig["symbol"] == symbol and sig["status"] == "open":
+            price = get_current_price(symbol)
+            if not price:
+                return jsonify({"error": "Could not get price"}), 400
+            direction  = sig.get("direction", "long")
+            remaining  = sig.get("remaining_size", sig.get("position_size", 0))
+            if direction == "long":
+                pnl = round(remaining * (price - sig["entry"]) / sig["entry"], 2)
+            else:
+                pnl = round(remaining * (sig["entry"] - price) / sig["entry"], 2)
+            sig["status"]      = "LOSS"
+            sig["close_price"] = price
+            sig["close_time"]  = datetime.now(timezone.utc).isoformat()
+            sig["pnl"]         = pnl
+            sig["exit_reason"] = "SENTINEL_CLOSE"
+            portfolio["balance"]   = round(portfolio["balance"] + remaining + pnl, 2)
+            portfolio["total_pnl"] = round(portfolio["total_pnl"] + pnl, 2)
+            save_json_data("portfolio.json", portfolio)
+            save_json_data("open_signals.json", open_signals)
+            record_trade_outcome(symbol,
+                sig.get("entry_hour", datetime.now(timezone.utc).hour),
+                "WIN_TP1" if pnl > 0 else "LOSS", pnl, direction,
+                limit_entry=sig.get("limit_entry", sig.get("entry", 0)))
+            broadcast("🛑 <b>Sentinel closed " + symbol + "</b>" + chr(10) +
+                      "Market reversal detected — trade closed early." + chr(10) +
+                      "P&L: " + ("+" if pnl >= 0 else "") + str(pnl) + "$")
+            logger.info("SENTINEL CLOSE: " + symbol + " pnl=" + str(pnl))
+            closed = True
+            break
+    return jsonify({"closed": closed, "symbol": symbol})
+
+# ============================================================
+# STATE MANAGEMENT
+# ============================================================
+DATA_DIR = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "/app")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+def _path(f): return os.path.join(DATA_DIR, f)
+
+def load_json_set(filename):
+    try:
+        p = _path(filename)
+        if os.path.exists(p):
+            with open(p) as f: return set(json.load(f))
+    except Exception: pass
+    return set()
+
+def save_json_set(filename, data):
+    try:
+        with open(_path(filename), "w") as f: json.dump(list(data), f)
+    except Exception: pass
+
+def load_json_data(filename, default):
+    try:
+        p = _path(filename)
+        if os.path.exists(p):
+            with open(p) as f: return json.load(f)
+    except Exception: pass
+    return default
+
+def save_json_data(filename, data):
+    try:
+        with open(_path(filename), "w") as f: json.dump(data, f, indent=2)
+    except Exception: pass
+
+def load_bot_running():
+    try:
+        p = _path("bot_running.json")
+        if os.path.exists(p):
+            with open(p) as f: return json.load(f).get("running", True)
+    except Exception: pass
+    return True
+
+def save_bot_running(state):
+    try:
+        with open(_path("bot_running.json"), "w") as f: json.dump({"running": state}, f)
+    except Exception: pass
+
+chat_ids              = load_json_set("chat_ids.json")
+paused_ids            = load_json_set("paused_ids.json")
+bot_running           = load_bot_running()
+open_signals          = load_json_data("open_signals.json", [])
+pending_limit_orders  = load_json_data("pending_limit_orders.json", [])
+daily_history         = load_json_data("daily_history.json", {})
+last_update_id        = 0
+last_scan_time        = 0
+last_track_time       = 0
+last_report_date      = None
+last_quiet_broadcast  = 0
+last_news_scan        = 0
+alerted_symbols       = {}
+active_source         = "CoinMarketCap"
+coin_cooldowns        = {}
+_intel_cache          = {}
+_intel_cache_ttl      = {}
+circuit_breaker_until = 0
+daily_loss_start      = {"date": "", "start_value": 0.0}
+
+# Cache for Sentinel's brain/weights — refresh every 30 min
+_sentinel_weights_cache     = {}
+_sentinel_weights_cache_ttl = 0
+SENTINEL_WEIGHTS_TTL        = 1800
+
+portfolio = load_json_data("portfolio.json", {
+    "balance": STARTING_BALANCE, "total_invested": 0.0,
+    "total_pnl": 0.0, "trade_count": 0
+})
+
+_raw_brain = load_json_data("brain.json", {})
+brain = {
+    "coin_stats":        _raw_brain.get("coin_stats", {}),
+    "hour_stats":        _raw_brain.get("hour_stats", {}),
+    "threshold_history": _raw_brain.get("threshold_history", []),
+    "rsi_oversold":      _raw_brain.get("rsi_oversold", RSI_OVERSOLD_LEVEL),
+    "volume_spike":      _raw_brain.get("volume_spike", VOLUME_SPIKE_RATIO),
+    "total_closed":      _raw_brain.get("total_closed", 0),
+    "long_closed":       _raw_brain.get("long_closed", 0),
+    "short_closed":      _raw_brain.get("short_closed", 0),
+    "long_wins":         _raw_brain.get("long_wins", 0),
+    "short_wins":        _raw_brain.get("short_wins", 0),
+    "streak":            _raw_brain.get("streak", 0),
+}
+
+for sym, cs in brain["coin_stats"].items():
+    if "long_wins" not in cs:
+        cs["long_wins"]    = cs.get("wins", 0) // 2
+        cs["long_losses"]  = cs.get("losses", 0) // 2
+        cs["short_wins"]   = cs.get("wins", 0) - cs["long_wins"]
+        cs["short_losses"] = cs.get("losses", 0) - cs["long_losses"]
+        cs["cooldown_until"] = 0
+
+RSI_OVERSOLD_LEVEL = brain["rsi_oversold"]
+VOLUME_SPIKE_RATIO = brain["volume_spike"]
+
+# ── ONE-TIME BRAIN CORRECTION — v1 fake losses ───────────────────────────────
+# Before limit orders existed, Bot1 entered at market price with no structure.
+# Price retraced, hit stop, counted as loss. Brain learned wrong lessons.
+# Last 48h data is clean (limit orders, proper structure). Older data is noise.
+# Fix: reset coin_stats and hour_stats for coins with <30% win rate from old data.
+# Preserve coins with good recent performance (XRP, SAND, TRX etc).
+# Flag prevents this running again on future restarts.
+if not _raw_brain.get("_v1_correction_done", False):
+    logger.info("One-time v1 brain correction starting...")
+    corrected_coins = []
+    for sym, cs in brain["coin_stats"].items():
+        w = cs.get("wins", 0); l = cs.get("losses", 0); total = w + l
+        if total < 3: continue  # not enough data to judge
+        wr = w / total
+        if wr < 0.30:
+            # Reset this coin — mostly fake v1 losses
+            brain["coin_stats"][sym] = {
+                "wins": 0, "losses": 0, "total_pnl": 0.0,
+                "long_wins": 0, "long_losses": 0,
+                "short_wins": 0, "short_losses": 0,
+                "cooldown_until": 0
+            }
+            corrected_coins.append(sym)
+        elif wr < 0.50 and total > 10:
+            # Partial reset — keep wins, halve losses (old losses likely fake)
+            new_l = max(0, l // 2)
+            brain["coin_stats"][sym]["losses"]       = new_l
+            brain["coin_stats"][sym]["long_losses"]  = max(0, cs.get("long_losses",0) // 2)
+            brain["coin_stats"][sym]["short_losses"]  = max(0, cs.get("short_losses",0) // 2)
+            corrected_coins.append(sym + "(partial)")
+    # Reset hour_stats — built from wrong entries, will rebuild clean
+    brain["hour_stats"] = {}
+    # Recalculate totals
+    total_w = sum(cs.get("wins",0) for cs in brain["coin_stats"].values())
+    total_l = sum(cs.get("losses",0) for cs in brain["coin_stats"].values())
+    brain["total_closed"] = total_w + total_l
+    brain["long_wins"]    = sum(cs.get("long_wins",0) for cs in brain["coin_stats"].values())
+    brain["short_wins"]   = sum(cs.get("short_wins",0) for cs in brain["coin_stats"].values())
+    brain["long_closed"]  = sum(cs.get("long_wins",0)+cs.get("long_losses",0) for cs in brain["coin_stats"].values())
+    brain["short_closed"] = sum(cs.get("short_wins",0)+cs.get("short_losses",0) for cs in brain["coin_stats"].values())
+    brain["streak"]       = 0  # fresh streak
+    brain["_v1_correction_done"] = True
+    save_json_data("brain.json", brain)
+    logger.info("v1 correction done. Corrected: " + str(corrected_coins))
+    logger.info("Brain now: " + str(total_w) + "W / " + str(total_l) + "L")
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ============================================================
+# ONE-TIME BRAIN CLEANUP — Remove fake v1 entries
+# ============================================================
+# Before limit orders existed, Bot1 entered at market price with wrong structure.
+# Losses from that period are fake learning — they pollute coin_stats and hour_stats.
+# Rule: keep coins with wins > losses (genuinely good learning)
+#       reset coins with losses >= wins AND total >= 4 (fake/polluted entries)
+#       reset hour_stats entirely (unreliable from old unstructured entries)
+if not brain.get("_brain_cleaned_v1", False):
+    logger.info("One-time brain cleanup: removing fake v1 entries...")
+    cleaned = 0
+    for sym in list(brain["coin_stats"].keys()):
+        cs  = brain["coin_stats"][sym]
+        w   = cs.get("wins", 0)
+        l   = cs.get("losses", 0)
+        tot = w + l
+        # Keep: wins >= losses (neutral or better — worth keeping)
+        # Reset: strictly more losses than wins with 4+ trades (clearly polluted)
+        if tot >= 4 and l > w:
+            brain["coin_stats"][sym] = {
+                "wins": 0, "losses": 0, "total_pnl": 0.0,
+                "long_wins": 0, "long_losses": 0,
+                "short_wins": 0, "short_losses": 0,
+                "cooldown_until": 0
+            }
+            cleaned += 1
+            logger.info("Reset: "+sym+" (was "+str(w)+"W/"+str(l)+"L)")
+    # Reset hour_stats — too unreliable from old random entries
+    brain["hour_stats"] = {}
+    # Reset aggregate counts to reflect clean state
+    all_w = sum(cs.get("wins",0) for cs in brain["coin_stats"].values())
+    all_l = sum(cs.get("losses",0) for cs in brain["coin_stats"].values())
+    brain["total_closed"]  = all_w + all_l
+    brain["long_wins"]     = sum(cs.get("long_wins",0) for cs in brain["coin_stats"].values())
+    brain["short_wins"]    = sum(cs.get("short_wins",0) for cs in brain["coin_stats"].values())
+    brain["long_closed"]   = sum(cs.get("long_wins",0)+cs.get("long_losses",0) for cs in brain["coin_stats"].values())
+    brain["short_closed"]  = sum(cs.get("short_wins",0)+cs.get("short_losses",0) for cs in brain["coin_stats"].values())
+    brain["streak"]        = 0
+    brain["_brain_cleaned_v1"] = True
+    save_json_data("brain.json", brain)
+    logger.info("Brain cleanup done: reset "+str(cleaned)+" coins, cleared hour_stats")
+    logger.info("Clean brain: "+str(all_w)+"W / "+str(all_l)+"L from "+str(len(brain["coin_stats"]))+" coins")
+
+# ============================================================
+# INTELLIGENCE REPORT
+# ============================================================
+def build_intelligence_report():
+    nl     = chr(10)
+    intel  = get_market_intelligence()
+    regime = get_sentinel_regime()
+    session, _, session_note = get_trading_session()
+    if not intel:
+        return "🔮 <b>Market Intelligence</b>" + nl + nl + "Data unavailable. Try again."
+    msg = ("🔮 <b>Market Intelligence v4.1</b>" + nl +
+           "━━━━━━━━━━━━━━━━━━━━━━" + nl + nl +
+           "<b>🌍 Market Regime (Sentinel):</b>" + nl +
+           regime.get("emoji","") + " " + regime.get("regime","?") + nl +
+           regime.get("note","") + nl + nl +
+           "<b>📡 Binance Futures (free):</b>" + nl +
+           "💰 Funding Rate:   " + intel.get("fr","N/A") + nl +
+           "⚖️ L/S Ratio:      " + intel.get("ls_ratio","N/A") + nl +
+           "🐋 Top Traders:    " + intel.get("top_trader","N/A") + nl +
+           "📊 Open Interest:  " + intel.get("oi","N/A") + nl + nl +
+           "<b>😱 Fear & Greed:</b>" + nl +
+           intel.get("fear_greed","N/A") + nl + nl +
+           "<b>⏰ Trading Session:</b>" + nl +
+           session_note + nl + nl)
+    if intel.get("summary"):
+        msg += "<b>⚠️ Active Signals:</b>" + nl + intel["summary"] + nl + nl
+    msg += "<b>🎯 Bot Decision:</b>" + nl
+    if intel.get("btc_squeeze"):
+        msg += "🚫 ALL trades blocked — BTC squeeze zone" + nl
+    elif intel.get("block_long") and intel.get("block_short"):
+        msg += "🚫 ALL trades blocked" + nl
+    elif intel.get("block_long"):
+        msg += "🚫 LONGS blocked | ✅ SHORTS allowed" + nl
+    elif intel.get("block_short"):
+        msg += "🚫 SHORTS blocked | ✅ LONGS allowed" + nl
+    else:
+        msg += "✅ Both LONGS and SHORTS allowed" + nl
+    msg += nl + "⏰ " + datetime.now(timezone.utc).strftime("%H:%M UTC")
+    return msg
+
+# ============================================================
+# TELEGRAM
+# ============================================================
+def send_message(chat_id, text):
+    url = "https://api.telegram.org/bot" + TELEGRAM_TOKEN + "/sendMessage"
+    try:
+        requests.post(url, json={"chat_id": chat_id, "text": text,
+                                 "parse_mode": "HTML"}, timeout=10)
+    except Exception as e:
+        logger.error("Telegram error: " + str(e))
+
+def broadcast(text):
+    for cid in chat_ids:
+        if cid not in paused_ids:
+            send_message(cid, text)
+
+def get_updates(offset=None):
+    url = "https://api.telegram.org/bot" + TELEGRAM_TOKEN + "/getUpdates"
+    try:
+        r = requests.get(url, params={"timeout": 10, "offset": offset}, timeout=15)
+        return r.json()
+    except Exception as e:
+        logger.error("Updates error: " + str(e))
+        return {"result": []}
+
+# ============================================================
+# SENTINEL INTEGRATION HELPERS — NEW v4.1
+# ============================================================
+def get_sentinel_weights():
+    """
+    NEW v4.1: Reads Sentinel's check weights every 30 min.
+    Bot1 uses these to adjust min score — if Sentinel trusts structure
+    more than RSI, Bot1 requires stronger structure signals to qualify.
+    Falls back to empty dict (no adjustment) if Sentinel is offline.
+    """
+    global _sentinel_weights_cache, _sentinel_weights_cache_ttl
+    now = time.time()
+    if now - _sentinel_weights_cache_ttl < SENTINEL_WEIGHTS_TTL and _sentinel_weights_cache:
+        return _sentinel_weights_cache
+    try:
+        r = requests.get(SENTINEL_URL.replace("/analyse", "/brain"), timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            _sentinel_weights_cache     = data.get("check_weights", {})
+            _sentinel_weights_cache_ttl = now
+            logger.info("Sentinel weights refreshed: " + str(_sentinel_weights_cache))
+            return _sentinel_weights_cache
+    except Exception as e:
+        logger.warning("Sentinel weights read failed: " + str(e))
+    return _sentinel_weights_cache  # return cached even if stale
+
+def get_sentinel_regime():
+    """
+    NEW v4.1: Reads Sentinel's regime instead of calculating own.
+    Sentinel is the single source of regime truth — both bots now agree.
+    Falls back to own calculation if Sentinel is offline.
+    """
+    try:
+        r = requests.get(SENTINEL_URL.replace("/analyse", "/regime"), timeout=5)
+        if r.status_code == 200:
+            data      = r.json()
+            mode      = data.get("mode", "UNKNOWN")
+            ema_slope = data.get("ema_slope", 0)
+            if mode == "TREND":
+                if ema_slope > 0:
+                    return {"regime": "BULL", "emoji": "🟢", "ch7d": 0,
+                            "bias": "bullish", "score_boost": 0,
+                            "max_longs": BULL_MAX_LONGS, "max_shorts": BULL_MAX_SHORTS,
+                            "note": "BULL (Sentinel TREND ↑ | slope "+str(ema_slope)+")"}
+                else:
+                    return {"regime": "BEAR", "emoji": "🔴", "ch7d": 0,
+                            "bias": "bearish", "score_boost": 0,
+                            "max_longs": BEAR_MAX_LONGS, "max_shorts": BEAR_MAX_SHORTS,
+                            "note": "BEAR (Sentinel TREND ↓ | slope "+str(ema_slope)+")"}
+            elif mode == "RANGE":
+                return {"regime": "SIDEWAYS", "emoji": "🟡", "ch7d": 0,
+                        "bias": "sideways", "score_boost": SIDEWAYS_SCORE_BOOST,
+                        "max_longs": SIDEWAYS_MAX_LONGS, "max_shorts": SIDEWAYS_MAX_SHORTS,
+                        "note": "SIDEWAYS (Sentinel RANGE)"}
+            elif mode == "TRANSITION":
+                return {"regime": "SIDEWAYS", "emoji": "🟡", "ch7d": 0,
+                        "bias": "sideways", "score_boost": SIDEWAYS_SCORE_BOOST + 1,
+                        "max_longs": SIDEWAYS_MAX_LONGS, "max_shorts": SIDEWAYS_MAX_SHORTS,
+                        "note": "TRANSITION (Sentinel — wait for confirmation, tighter entries)"}
+    except Exception as e:
+        logger.warning("Sentinel regime read failed, using own: " + str(e))
+    return get_cached_regime()
+
+def notify_sentinel_fill(symbol, direction, fill_price, limit_entry, stop, tp1, tp2):
+    """
+    NEW v4.1: When a limit order fills, immediately tell Sentinel.
+    Sentinel no longer needs to poll price — it gets exact fill data.
+    This makes entry_learning accurate (correct fill distance calculation).
+    """
+    try:
+        r = requests.post(
+            SENTINEL_URL.replace("/analyse", "/filled"),
+            json={
+                "symbol":      symbol,
+                "direction":   direction,
+                "fill_price":  fill_price,
+                "limit_entry": limit_entry,
+                "stop":        stop,
+                "tp1":         tp1,
+                "tp2":         tp2
+            },
+            timeout=6
+        )
+        if r.status_code == 200:
+            fill_dist = r.json().get("fill_dist", 0)
+            logger.info("Sentinel fill notified: "+symbol+" "+direction+" @ $"+str(fill_price)+
+                        " dist "+str(fill_dist)+"%")
+        else:
+            logger.warning("Sentinel fill notification returned: " + str(r.status_code))
+    except Exception as e:
+        logger.warning("Sentinel fill notification failed: " + str(e))
+
+# ============================================================
+# MARKET DATA — BINANCE
+# ============================================================
+def get_klines(symbol, interval="1h", limit=210):
+    url = "https://api.binance.com/api/v3/klines"
+    try:
+        r = requests.get(url, params={"symbol": symbol+"USDT",
+                                      "interval": interval, "limit": limit}, timeout=10)
+        data = r.json()
+        if isinstance(data, list) and data:
+            return [[str(c[0]),str(c[1]),str(c[2]),str(c[3]),str(c[4]),str(c[5])] for c in data]
+        return []
+    except Exception as e:
+        logger.error("Klines " + symbol + ": " + str(e)); return []
+
+def get_current_price(symbol):
+    try:
+        r = requests.get("https://api.binance.com/api/v3/ticker/price",
+                         params={"symbol": symbol+"USDT"}, timeout=10)
+        data = r.json()
+        if "price" in data: return float(data["price"])
+    except Exception as e:
+        logger.error("Price " + symbol + ": " + str(e))
+    return None
+
+def get_btc_24h_change():
+    try:
+        r = requests.get("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT", timeout=8)
+        return float(r.json().get("priceChangePercent", 0))
+    except Exception: return 0.0
+
+def get_news_sentiment(symbol):
+    try:
+        r    = requests.get("https://cointelegraph.com/rss/tag/" + symbol.lower(), timeout=6)
+        text = r.text.lower()
+        headlines = []
+        for p in r.text.split("<title>")[1:4]:
+            h = p.split("</title>")[0].strip()
+            if h and len(h) > 5: headlines.append(h[:120])
+        pos = sum(1 for w in ["bull","pump","moon","rally","adopt","partnership","approved","launch"] if w in text)
+        neg = sum(1 for w in ["crash","dump","ban","bear","hack","scam","regulation","lawsuit","bankrupt"] if w in text)
+        return pos - neg, headlines
+    except Exception: return 0, []
+
+# ============================================================
+# DERIVATIVES INTELLIGENCE
+# ============================================================
+def _intel_get(url, params=None):
+    key = url + str(params)
+    now = time.time()
+    if key in _intel_cache and now - _intel_cache_ttl.get(key, 0) < INTEL_CACHE_SECONDS:
+        return _intel_cache[key]
+    try:
+        r    = requests.get(url, params=params, timeout=10)
+        data = r.json()
+        _intel_cache[key]     = data
+        _intel_cache_ttl[key] = now
+        return data
+    except Exception as e:
+        logger.error("Intel fetch: " + str(e)); return None
+
+def get_funding_rate(symbol="BTCUSDT"):
+    try:
+        data = _intel_get(BINANCE_FUTURES_BASE + "/fapi/v1/fundingRate",
+                          {"symbol": symbol, "limit": 1})
+        if data and isinstance(data, list) and data:
+            return round(float(data[-1].get("fundingRate", 0)), 6)
+        return None
+    except Exception: return None
+
+def get_long_short_ratio(symbol="BTCUSDT"):
+    try:
+        data = _intel_get(BINANCE_FUTURES_BASE + "/futures/data/globalLongShortAccountRatio",
+                          {"symbol": symbol, "period": "1h", "limit": 1})
+        if data and isinstance(data, list) and data:
+            lp = round(float(data[-1].get("longAccount",  0.5)) * 100, 1)
+            sp = round(float(data[-1].get("shortAccount", 0.5)) * 100, 1)
+            return lp, sp
+        return None, None
+    except Exception: return None, None
+
+def get_open_interest_change(symbol="BTCUSDT"):
+    try:
+        data = _intel_get(BINANCE_FUTURES_BASE + "/futures/data/openInterestHist",
+                          {"symbol": symbol, "period": "4h", "limit": 2})
+        if data and isinstance(data, list) and len(data) >= 2:
+            prev = float(data[-2].get("sumOpenInterestValue", 0))
+            curr = float(data[-1].get("sumOpenInterestValue", 0))
+            chg  = round(((curr - prev) / prev) * 100, 2) if prev > 0 else 0
+            return round(curr / 1e9, 2), chg
+        return None, None
+    except Exception: return None, None
+
+def get_top_trader_ratio(symbol="BTCUSDT"):
+    try:
+        data = _intel_get(BINANCE_FUTURES_BASE + "/futures/data/topLongShortAccountRatio",
+                          {"symbol": symbol, "period": "1h", "limit": 1})
+        if data and isinstance(data, list) and data:
+            lp = round(float(data[-1].get("longAccount",  0.5)) * 100, 1)
+            sp = round(float(data[-1].get("shortAccount", 0.5)) * 100, 1)
+            return lp, sp
+        return None, None
+    except Exception: return None, None
+
+def get_fear_greed():
+    try:
+        data = _intel_get(FEAR_GREED_URL)
+        if data and "data" in data and data["data"]:
+            val    = int(data["data"][0]["value"])
+            classif= data["data"][0]["value_classification"]
+            return val, classif
+        return None, None
+    except Exception: return None, None
+
+def get_trading_session():
+    hour = datetime.now(timezone.utc).hour
+    if 14 <= hour < 17:
+        return "London/NY Overlap", -2, "🟢 Best session — entries easier"
+    elif 14 <= hour < 20:
+        return "NY Session", -1, "🟢 NY session — reliable signals"
+    elif 8 <= hour < 12:
+        return "London Session", 0, "🟡 London session — normal"
+    elif 12 <= hour < 14:
+        return "Between Sessions", 1, "🟡 Between sessions — slightly tighter"
+    elif 0 <= hour < 8:
+        return "Asian Session", 3, "🔴 Asian session — fake moves likely, +3 score required"
+    else:
+        return "After Hours", 1, "🟡 After hours — slightly tighter"
+
+def get_market_intelligence():
+    fr                  = get_funding_rate()
+    long_pct, short_pct = get_long_short_ratio()
+    oi_b, oi_chg        = get_open_interest_change()
+    top_long, top_short = get_top_trader_ratio()
+    fg_val, fg_class    = get_fear_greed()
+    session, score_mod, session_note = get_trading_session()
+
+    block_long  = False
+    block_short = False
+    bias        = "neutral"
+    warnings    = []
+    boosts      = []
+    nl          = chr(10)
+
+    fr_str = "N/A"
+    if fr is not None:
+        fr_pct = round(fr * 100, 4)
+        fr_str = str(fr_pct) + "%"
+        if fr > 0.001:
+            block_long = True
+            warnings.append("⚠️ Funding extremely high (" + fr_str + ") — longs blocked")
+            bias = "bearish"
+        elif fr > 0.0003:
+            warnings.append("🟡 Funding elevated (" + fr_str + ") — caution on longs")
+        elif fr < -0.001:
+            block_short = True
+            warnings.append("⚠️ Funding extremely negative (" + fr_str + ") — shorts blocked")
+            bias = "bullish"
+        elif fr < -0.0003:
+            warnings.append("🟡 Funding negative (" + fr_str + ") — caution on shorts")
+        else:
+            boosts.append("✅ Funding neutral (" + fr_str + ")")
+
+    ls_str = "N/A"
+    if long_pct is not None:
+        ls_str = str(long_pct) + "% L / " + str(short_pct) + "% S"
+        if long_pct > 65:
+            warnings.append("⚠️ " + ls_str + " — overcrowded longs, squeeze DOWN likely")
+            if bias == "neutral": bias = "bearish"
+        elif long_pct < 35:
+            warnings.append("⚠️ " + ls_str + " — overcrowded shorts, squeeze UP likely")
+            if bias == "neutral": bias = "bullish"
+        elif long_pct > 58:
+            warnings.append("🟡 " + ls_str + " — slight long crowding")
+        else:
+            boosts.append("✅ L/S balanced (" + ls_str + ")")
+
+    tt_str = "N/A"
+    if top_long is not None:
+        tt_str = str(top_long) + "% L / " + str(top_short) + "% S"
+        if top_long > 65:
+            boosts.append("🐋 Smart money long (" + tt_str + ") — bullish signal")
+            if bias == "neutral": bias = "bullish"
+        elif top_long < 35:
+            warnings.append("🐋 Smart money short (" + tt_str + ") — bearish signal")
+            if bias == "neutral": bias = "bearish"
+        else:
+            boosts.append("🐋 Smart money neutral (" + tt_str + ")")
+
+    oi_str = "N/A"
+    if oi_b is not None:
+        oi_str = "$" + str(oi_b) + "B (" + ("+" if oi_chg >= 0 else "") + str(oi_chg) + "% 4H)"
+        if oi_chg > 5:
+            boosts.append("🔥 OI rising fast " + oi_str + " — big move building")
+        elif oi_chg > 2:
+            boosts.append("📈 OI rising " + oi_str)
+        elif oi_chg < -5:
+            warnings.append("📉 OI dropping fast " + oi_str + " — trend weakening")
+        else:
+            boosts.append("➡️ OI stable " + oi_str)
+
+    fg_str = "N/A"
+    if fg_val is not None:
+        fg_str = str(fg_val) + " — " + fg_class
+        if fg_val <= 25:
+            boosts.append("😱 Extreme Fear (" + fg_str + ") — historically strong buy zone")
+            if bias == "neutral": bias = "bullish"
+        elif fg_val >= 75:
+            warnings.append("🤑 Extreme Greed (" + fg_str + ") — historically strong short zone")
+            if bias == "neutral": bias = "bearish"
+        else:
+            boosts.append("😐 Fear & Greed: " + fg_str)
+
+    btc_squeeze = False
+    if long_pct and short_pct and abs(long_pct - short_pct) < 3:
+        btc_squeeze = True
+        warnings.append("⚠️ BTC L/S nearly equal — choppy zone, all trades blocked")
+        block_long  = True
+        block_short = True
+
+    summary = ""
+    if warnings: summary += nl.join(warnings) + nl
+    if boosts:   summary += nl.join(boosts)
+
+    return {
+        "block_long":   block_long,
+        "block_short":  block_short,
+        "bias":         bias,
+        "btc_squeeze":  btc_squeeze,
+        "fr":           fr_str,
+        "ls_ratio":     ls_str,
+        "top_trader":   tt_str,
+        "oi":           oi_str,
+        "fear_greed":   fg_str,
+        "fg_val":       fg_val,
+        "session":      session,
+        "session_mod":  score_mod,
+        "session_note": session_note,
+        "summary":      summary.strip()
+    }
+
+# ============================================================
+# MARKET CONDITION DETECTION
+# ============================================================
+def get_btc_market_regime():
+    try:
+        d1  = get_klines("BTC", "1d", 210)
+        h4  = get_klines("BTC", "4h", 210)
+        if not d1 or not h4: return _default_regime()
+
+        d1_closes = [float(c[4]) for c in d1]
+        h4_closes = [float(c[4]) for c in h4]
+        d1_ema50  = calc_ema(d1_closes, 50)[-1]
+        d1_ema200 = calc_ema(d1_closes, 200)[-1] if len(d1_closes) >= 200 else d1_ema50
+        h4_ema21  = calc_ema(h4_closes, 21)[-1]
+        h4_ema50  = calc_ema(h4_closes, 50)[-1]
+        cur_price = d1_closes[-1]
+        ch7d      = round(((cur_price - d1_closes[-8]) / d1_closes[-8]) * 100, 2) if len(d1_closes) >= 8 else 0
+
+        bull_votes = 0; bear_votes = 0
+        if cur_price > d1_ema200: bull_votes += 2
+        else:                     bear_votes += 2
+        if cur_price > d1_ema50:  bull_votes += 1
+        else:                     bear_votes += 1
+        if h4_ema21 > h4_ema50:   bull_votes += 1
+        else:                     bear_votes += 1
+        if ch7d > 3:              bull_votes += 1
+        elif ch7d < -3:           bear_votes += 1
+
+        if bull_votes >= 4:
+            return {"regime": "BULL", "emoji": "🟢", "ch7d": ch7d,
+                    "bias": "bullish", "score_boost": 0,
+                    "max_longs": BULL_MAX_LONGS, "max_shorts": BULL_MAX_SHORTS,
+                    "note": "Bullish — max " + str(BULL_MAX_LONGS) + "L / " + str(BULL_MAX_SHORTS) + "S"}
+        elif bear_votes >= 4:
+            return {"regime": "BEAR", "emoji": "🔴", "ch7d": ch7d,
+                    "bias": "bearish", "score_boost": 0,
+                    "max_longs": BEAR_MAX_LONGS, "max_shorts": BEAR_MAX_SHORTS,
+                    "note": "Bearish — max " + str(BEAR_MAX_LONGS) + "L / " + str(BEAR_MAX_SHORTS) + "S"}
+        else:
+            return {"regime": "SIDEWAYS", "emoji": "🟡", "ch7d": ch7d,
+                    "bias": "sideways", "score_boost": SIDEWAYS_SCORE_BOOST,
+                    "max_longs": SIDEWAYS_MAX_LONGS, "max_shorts": SIDEWAYS_MAX_SHORTS,
+                    "note": "Sideways — score +" + str(SIDEWAYS_SCORE_BOOST)}
+    except Exception as e:
+        logger.error("Market regime: " + str(e)); return _default_regime()
+
+def _default_regime():
+    return {"regime": "UNKNOWN", "emoji": "❓", "ch7d": 0,
+            "bias": "neutral", "score_boost": 99,
+            "max_longs": 0, "max_shorts": 0,
+            "note": "Regime calculating — no trades until market is assessed"}
+
+_regime_cache = {"data": None, "ts": 0}
+def get_cached_regime():
+    now = time.time()
+    if _regime_cache["data"] is None or now - _regime_cache["ts"] > 1800:
+        _regime_cache["data"] = get_btc_market_regime()
+        _regime_cache["ts"]   = now
+    return _regime_cache["data"]
+
+def get_market_regime():
+    try:
+        r = requests.get("https://api.binance.com/api/v3/klines",
+                         params={"symbol":"BTCUSDT","interval":"1d","limit":7}, timeout=10)
+        candles = r.json()
+        if not candles or len(candles) < 7: return "❓ UNKNOWN"
+        closes    = [float(c[4]) for c in candles]
+        change_7d = round(((closes[-1]-closes[0])/closes[0])*100, 2)
+        if change_7d > 5:  return "🟢 BULL (" + str(change_7d) + "% 7d)"
+        if change_7d < -5: return "🔴 BEAR (" + str(change_7d) + "% 7d)"
+        return "🟡 SIDEWAYS (" + str(change_7d) + "% 7d)"
+    except Exception: return "❓ UNKNOWN"
+
+# ============================================================
+# TECHNICAL INDICATORS
+# ============================================================
+def calc_ema(values, period):
+    if len(values) < period:
+        avg = sum(values) / len(values)
+        return [avg] * len(values)
+    ema = [sum(values[:period]) / period]
+    m   = 2.0 / (period + 1)
+    for p in values[period:]: ema.append((p - ema[-1]) * m + ema[-1])
+    return ema
+
+def calc_rsi_wilder(closes, period=14):
+    if len(closes) < period + 1: return 50.0
+    deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
+    gains  = [max(d, 0.0) for d in deltas]
+    losses = [max(-d, 0.0) for d in deltas]
+    ag = sum(gains[:period]) / period
+    al = sum(losses[:period]) / period
+    for i in range(period, len(gains)):
+        ag = (ag * (period-1) + gains[i])  / period
+        al = (al * (period-1) + losses[i]) / period
+    if al == 0: return 100.0
+    return round(100.0 - (100.0 / (1.0 + ag / al)), 2)
+
+def calc_rsi_series(closes, period=14):
+    if len(closes) < period + 2: return [50.0] * len(closes)
+    deltas = [closes[i]-closes[i-1] for i in range(1, len(closes))]
+    gains  = [max(d, 0.0) for d in deltas]
+    losses = [max(-d, 0.0) for d in deltas]
+    rsi_s  = []
+    ag = sum(gains[:period]) / period
+    al = sum(losses[:period]) / period
+    for i in range(period, len(gains)):
+        ag = (ag*(period-1) + gains[i])  / period
+        al = (al*(period-1) + losses[i]) / period
+        rsi_s.append(100.0 if al == 0 else 100.0 - (100.0 / (1.0 + ag/al)))
+    return rsi_s
+
+def calc_macd(closes, fast=12, slow=26, signal=9):
+    if len(closes) < slow + signal + 1: return None, None, None, None, None
+    ef  = calc_ema(closes, fast)
+    es  = calc_ema(closes, slow)
+    ml  = min(len(ef), len(es))
+    mac = [ef[-(ml-i)] - es[-(ml-i)] for i in range(ml)]
+    sig = calc_ema(mac, signal)
+    return (mac[-1], sig[-1], mac[-1]-sig[-1],
+            mac[-2] if len(mac)  >= 2 else mac[-1],
+            sig[-2] if len(sig) >= 2 else sig[-1])
+
+def calc_atr(highs, lows, closes, period=14):
+    if len(closes) < 2: return highs[-1] - lows[-1]
+    trs = [max(highs[i]-lows[i], abs(highs[i]-closes[i-1]),
+               abs(lows[i]-closes[i-1])) for i in range(1, len(closes))]
+    if len(trs) < period: return sum(trs)/len(trs)
+    atr = sum(trs[:period]) / period
+    for tr in trs[period:]: atr = (atr*(period-1)+tr)/period
+    return atr
+
+def calc_bollinger_bands(closes, period=20, std_dev=2.0):
+    if len(closes) < period: return None, None, None
+    recent   = closes[-period:]
+    ma       = sum(recent) / period
+    variance = sum((x-ma)**2 for x in recent) / period
+    std      = variance**0.5
+    return ma+std_dev*std, ma, ma-std_dev*std
+
+def calc_volume_delta(candles):
+    if not candles or len(candles) < 3: return 0.5
+    scores = []
+    for c in candles[-10:]:
+        h,l,cl,op = float(c[2]),float(c[3]),float(c[4]),float(c[1])
+        rng = h-l
+        if rng == 0: scores.append(0.5); continue
+        pos = (cl-l)/rng
+        scores.append(min(pos+0.1,1.0) if cl>op else max(pos-0.1,0.0))
+    return round(sum(scores)/len(scores), 3)
+
+def calc_vwap(candles):
+    if not candles or len(candles) < 5: return None, 0
+    try:
+        cum_pv = 0.0; cum_v = 0.0
+        for c in candles[-48:]:
+            typical = (float(c[2]) + float(c[3]) + float(c[4])) / 3
+            vol     = float(c[5])
+            cum_pv += typical * vol
+            cum_v  += vol
+        if cum_v == 0: return None, 0
+        vwap     = cum_pv / cum_v
+        cur      = float(candles[-1][4])
+        position = round(((cur - vwap) / vwap) * 100, 3)
+        return round(vwap, 6), position
+    except Exception: return None, 0
+
+def calc_obv(closes, volumes):
+    if len(closes) < 10 or len(volumes) < 10: return "neutral", None
+    obv = 0.0; obv_series = []
+    for i in range(1, len(closes)):
+        if closes[i] > closes[i-1]:   obv += volumes[i]
+        elif closes[i] < closes[i-1]: obv -= volumes[i]
+        obv_series.append(obv)
+    if len(obv_series) < 20: return "neutral", None
+    obv_recent  = sum(obv_series[-5:]) / 5
+    obv_early   = sum(obv_series[-20:-15]) / 5
+    price_recent= sum(closes[-5:]) / 5
+    price_early = sum(closes[-20:-15]) / 5
+    obv_rising  = obv_recent > obv_early * 1.01
+    obv_falling = obv_recent < obv_early * 0.99
+    price_rising= price_recent > price_early * 1.005
+    price_falling=price_recent < price_early * 0.995
+    divergence = None
+    if price_falling and obv_rising:  divergence = "bullish"
+    if price_rising  and obv_falling: divergence = "bearish"
+    obv_trend = "rising" if obv_rising else ("falling" if obv_falling else "neutral")
+    return obv_trend, divergence
+
+def detect_liquidity_sweep(highs, lows, closes, lookback=20):
+    if len(highs) < lookback + 3: return None
+    recent_high = max(highs[-lookback:-3])
+    recent_low  = min(lows[-lookback:-3])
+    cur_close   = closes[-1]
+    prev_close  = closes[-2]
+    cur_high    = highs[-1]
+    cur_low     = lows[-1]
+    if cur_low < recent_low and cur_close > recent_low and prev_close > recent_low:
+        sweep_pct = round((recent_low - cur_low) / recent_low * 100, 3)
+        if sweep_pct > 0.1: return "bullish_sweep"
+    if cur_high > recent_high and cur_close < recent_high and prev_close < recent_high:
+        sweep_pct = round((cur_high - recent_high) / recent_high * 100, 3)
+        if sweep_pct > 0.1: return "bearish_sweep"
+    return None
+
+def detect_sweep_and_retest(symbol, direction):
+    try:
+        raw = get_klines(symbol, "15m", 50)
+        if not raw or len(raw) < 20: return None
+        highs  = [float(c[2]) for c in raw]
+        lows   = [float(c[3]) for c in raw]
+        closes = [float(c[4]) for c in raw]
+        if direction == "long":
+            recent_low   = min(lows[-20:-5])
+            sweep_candle = None; wick_low = None
+            for i in range(-10, -2):
+                candle_low   = lows[i]; candle_close = closes[i]
+                if candle_low < recent_low and candle_close > recent_low:
+                    sweep_pct = (recent_low - candle_low) / recent_low * 100
+                    if sweep_pct > 0.15:
+                        sweep_candle = i; wick_low = candle_low; break
+            if sweep_candle is None or wick_low is None: return None
+            cur_low   = lows[-1]; cur_close = closes[-1]
+            retest_zone      = recent_low * 1.005
+            retest_happening = cur_low <= retest_zone
+            wick_not_broken  = cur_low > wick_low
+            bounce_confirmed = cur_close > cur_low
+            if retest_happening and wick_not_broken and bounce_confirmed:
+                return {"sweep_found":True,"wick_extreme":round(wick_low,6),
+                        "retest_confirmed":True,"direction":"long","tf":"15min"}
+        else:
+            recent_high  = max(highs[-20:-5])
+            sweep_candle = None; wick_high = None
+            for i in range(-10, -2):
+                candle_high  = highs[i]; candle_close = closes[i]
+                if candle_high > recent_high and candle_close < recent_high:
+                    sweep_pct = (candle_high - recent_high) / recent_high * 100
+                    if sweep_pct > 0.15:
+                        sweep_candle = i; wick_high = candle_high; break
+            if sweep_candle is None or wick_high is None: return None
+            cur_high  = highs[-1]; cur_close = closes[-1]
+            retest_zone        = recent_high * 0.995
+            retest_happening   = cur_high >= retest_zone
+            wick_not_broken    = cur_high < wick_high
+            rejection_confirmed= cur_close < cur_high
+            if retest_happening and wick_not_broken and rejection_confirmed:
+                return {"sweep_found":True,"wick_extreme":round(wick_high,6),
+                        "retest_confirmed":True,"direction":"short","tf":"15min"}
+        return None
+    except Exception as e:
+        logger.error("Sweep retest " + symbol + ": " + str(e)); return None
+
+def detect_market_structure(highs, lows, lookback=14):
+    if len(highs) < lookback or len(lows) < lookback: return "sideways"
+    half = lookback//2
+    eh, rh = max(highs[-lookback:-half]), max(highs[-half:])
+    el, rl = min(lows[-lookback:-half]),  min(lows[-half:])
+    if rh > eh and rl > el: return "uptrend"
+    if rh < eh and rl < el: return "downtrend"
+    return "sideways"
+
+def find_key_levels(highs, lows, closes, tolerance=0.005):
+    all_lv = list(highs[-40:]) + list(lows[-40:])
+    key    = []
+    for lv in all_lv:
+        t = sum(1 for h in highs[-40:] if abs(h-lv)/lv < tolerance)
+        t+= sum(1 for l in lows[-40:]  if abs(l-lv)/lv < tolerance)
+        if t >= 2: key.append((lv, t))
+    cur = closes[-1]
+    if not key: return max(highs[-20:]), min(lows[-20:])
+    key.sort(key=lambda x: x[1], reverse=True)
+    res = [(l,t) for l,t in key if l > cur]
+    sup = [(l,t) for l,t in key if l <= cur]
+    return (res[0][0] if res else max(highs[-20:]),
+            sup[0][0] if sup else min(lows[-20:]))
+
+def get_mtf_levels(symbol, cur_price):
+    levels = []
+    for interval, label in [("15m","15min"), ("30m","30min"), ("1h","1H"), ("4h","4H")]:
+        try:
+            raw = get_klines(symbol, interval, 100)
+            if not raw or len(raw) < 20: continue
+            highs  = [float(c[2]) for c in raw]
+            lows   = [float(c[3]) for c in raw]
+            closes = [float(c[4]) for c in raw]
+            res, sup = find_key_levels(highs, lows, closes)
+            if res > cur_price:
+                levels.append({"level": res, "tf": label, "type": "resistance",
+                                "dist_pct": round((res - cur_price) / cur_price * 100, 3)})
+            if sup < cur_price:
+                levels.append({"level": sup, "tf": label, "type": "support",
+                                "dist_pct": round((cur_price - sup) / cur_price * 100, 3)})
+        except Exception: continue
+    return levels
+
+def detect_rsi_divergence(closes, rsi_series, lookback=20):
+    if len(closes) < lookback or len(rsi_series) < lookback: return None
+    half = lookback//2
+    pe   = closes[-lookback:-half];   pr = closes[-half:]
+    re   = rsi_series[-lookback:-half] if len(rsi_series)>=lookback else rsi_series
+    rr   = rsi_series[-half:] if len(rsi_series)>=half else rsi_series
+    if not pe or not pr or not re or not rr: return None
+    if min(pr)<min(pe) and min(rr)>min(re): return "bullish"
+    if max(pr)>max(pe) and max(rr)<max(re): return "bearish"
+    return None
+
+def check_volume_alignment(symbol):
+    try:
+        regime      = get_sentinel_regime()  # v4.1: use Sentinel regime
+        is_sideways = regime.get("regime") in ["SIDEWAYS", "RANGE"]
+    except Exception:
+        is_sideways = False
+
+    spike_threshold = 1.4 if is_sideways else VOLUME_SPIKE_RATIO
+    results = []
+    for interval, lbl in [("30m","30m"),("1h","1H"),("4h","4H")]:
+        try:
+            raw = get_klines(symbol, interval, 30)
+            if not raw or len(raw) < 22:
+                results.append((lbl, False, 1.0)); continue
+            vols   = [float(c[5]) for c in raw]
+            avg_v  = sum(vols[-21:-1]) / 20 if len(vols) > 20 else 1
+            cur_v  = vols[-1]
+            ratio  = cur_v / avg_v if avg_v > 0 else 1.0
+            spike  = ratio >= spike_threshold
+            results.append((lbl, spike, round(ratio, 2)))
+        except Exception:
+            results.append((lbl, False, 1.0))
+
+    aligned_count = sum(1 for _, s, _ in results if s)
+    detail        = " | ".join(lbl + ": " + str(r) + "x" + (" ✅" if s else "") for lbl, s, r in results)
+    min_required  = 1 if is_sideways else 2
+    return aligned_count >= min_required, aligned_count, detail
+
+# ============================================================
+# SELF-LEARNING BRAIN
+# ============================================================
+def get_learning_phase():
+    n = brain["total_closed"]
+    if n < BRAIN_EXPLORE_PHASE: return 0, "🔍 EXPLORING"
+    if n < BRAIN_ADAPT_PHASE:   return 1, "🧪 ADAPTING"
+    return 2, "🧠 FULL TRUST"
+
+def record_trade_outcome(symbol, hour, result, pnl, direction="long", limit_entry=0):
+    """
+    UPDATED v4.1: Added limit_entry parameter.
+    Now sends limit_entry to Sentinel /outcome so entry_learning can
+    calculate accurate fill distance (how far actual fill was from S/R level).
+    """
+    global brain
+    is_win = "WIN" in result
+
+    if symbol not in brain["coin_stats"]:
+        brain["coin_stats"][symbol] = {
+            "wins": 0, "losses": 0, "total_pnl": 0.0,
+            "long_wins": 0, "long_losses": 0,
+            "short_wins": 0, "short_losses": 0,
+            "cooldown_until": 0
+        }
+    cs = brain["coin_stats"][symbol]
+    cs["wins" if is_win else "losses"] += 1
+    cs["total_pnl"] = round(cs["total_pnl"] + pnl, 4)
+
+    if direction == "long":
+        cs["long_wins"   if is_win else "long_losses"] += 1
+        brain["long_closed"] += 1
+        if is_win: brain["long_wins"] += 1
+    else:
+        cs["short_wins"  if is_win else "short_losses"] += 1
+        brain["short_closed"] += 1
+        if is_win: brain["short_wins"] += 1
+
+    global circuit_breaker_until
+    if is_win:
+        brain["streak"] = max(brain["streak"] + 1, 1)
+    else:
+        brain["streak"] = min(brain["streak"] - 1, -1)
+        cs["cooldown_until"] = time.time() + COIN_COOLDOWN_SECONDS
+        coin_cooldowns[symbol] = cs["cooldown_until"]
+        if brain["streak"] <= -CIRCUIT_BREAKER_LOSSES and time.time() >= circuit_breaker_until:
+            circuit_breaker_until = time.time() + CIRCUIT_BREAKER_MINUTES * 60
+            broadcast("🛑 <b>Circuit Breaker Activated</b>" + chr(10) +
+                      str(CIRCUIT_BREAKER_LOSSES) + " consecutive losses detected." + chr(10) +
+                      "Pausing all new entries for " + str(CIRCUIT_BREAKER_MINUTES) + " minutes.")
+
+    hour_key = str(hour)
+    if hour_key not in brain["hour_stats"]:
+        brain["hour_stats"][hour_key] = {"wins": 0, "losses": 0}
+    brain["hour_stats"][hour_key]["wins" if is_win else "losses"] += 1
+
+    brain["total_closed"] += 1
+
+    if brain["total_closed"] % 50 == 0:
+        auto_tune_thresholds()
+
+    save_json_data("brain.json", brain)
+
+    # ── Notify Sentinel — now includes limit_entry for accurate entry learning ──
+    try:
+        requests.post(
+            SENTINEL_URL.replace("/analyse", "/outcome"),
+            json={
+                "symbol":      symbol,
+                "direction":   direction,
+                "result":      result,
+                "pnl":         pnl,
+                "limit_entry": limit_entry   # NEW v4.1 — Sentinel uses this for fill distance
+            },
+            timeout=10
+        )
+        logger.info("Sentinel notified of outcome: " + symbol + " " + result +
+                    (" limit=$"+str(limit_entry) if limit_entry else ""))
+    except Exception as e:
+        logger.warning("Sentinel outcome notification failed: " + str(e))
+
+    phase_num, phase_name = get_learning_phase()
+    logger.info("TRADE CLOSED: " + symbol + " " + direction.upper() +
+                " | " + result + " | PnL $" + str(pnl) +
+                " | Phase: " + phase_name + " | Streak: " + str(brain["streak"]))
+
+def get_learned_win_rate(symbol, hour, direction="long"):
+    phase_num, _ = get_learning_phase()
+    if phase_num == 0: return 0.5
+    cs = brain["coin_stats"].get(symbol, {})
+    if direction == "long":
+        dw = cs.get("long_wins", 0);  dl = cs.get("long_losses", 0)
+    else:
+        dw = cs.get("short_wins", 0); dl = cs.get("short_losses", 0)
+    dt = dw + dl
+    ow = cs.get("wins", 0); ol = cs.get("losses", 0); ot = ow + ol
+    coin_rate = (dw/dt) if dt >= 10 else ((ow/ot) if ot >= 10 else 0.5)
+    hs        = brain["hour_stats"].get(str(hour), {})
+    hw        = hs.get("wins", 0); hl = hs.get("losses", 0); ht = hw + hl
+    hour_rate = (hw/ht) if ht >= 10 else 0.5
+    return round(coin_rate * 0.6 + hour_rate * 0.4, 3)
+
+def get_direction_bias():
+    lc = brain["long_closed"];  lw = brain["long_wins"]
+    sc = brain["short_closed"]; sw = brain["short_wins"]
+    long_wr  = round(lw/lc, 3) if lc > 5 else 0.5
+    short_wr = round(sw/sc, 3) if sc > 5 else 0.5
+    if long_wr > short_wr + 0.1:   preferred = "long"
+    elif short_wr > long_wr + 0.1: preferred = "short"
+    else:                           preferred = "both"
+    return long_wr, short_wr, preferred
+
+def auto_tune_thresholds():
+    global brain, RSI_OVERSOLD_LEVEL, VOLUME_SPIKE_RATIO
+    all_wins   = sum(cs.get("wins",0)   for cs in brain["coin_stats"].values())
+    all_losses = sum(cs.get("losses",0) for cs in brain["coin_stats"].values())
+    total      = all_wins + all_losses
+    if total < 20: return
+    overall_wr = all_wins / total
+    if overall_wr < 0.50:
+        brain["rsi_oversold"] = max(30, brain["rsi_oversold"] - 2)
+        brain["volume_spike"] = min(2.5, brain["volume_spike"] + 0.1)
+    elif overall_wr > 0.65:
+        brain["rsi_oversold"] = min(45, brain["rsi_oversold"] + 1)
+        brain["volume_spike"] = max(1.2, brain["volume_spike"] - 0.05)
+    RSI_OVERSOLD_LEVEL = brain["rsi_oversold"]
+    VOLUME_SPIKE_RATIO = brain["volume_spike"]
+    brain["threshold_history"].append({
+        "at_trade": brain["total_closed"],
+        "rsi": RSI_OVERSOLD_LEVEL,
+        "vol": round(VOLUME_SPIKE_RATIO, 2),
+        "win_rate": round(overall_wr, 3)
+    })
+
+def calc_position_size(score, symbol, hour, direction="long", atr_pct=None):
+    phase_num, _ = get_learning_phase()
+    balance      = portfolio.get("balance", STARTING_BALANCE)
+    base_min     = max(MIN_TRADE_SIZE, round(balance * MIN_TRADE_PCT, 2))
+    base_max     = max(base_min, round(balance * MAX_TRADE_PCT, 2))
+    base_max     = min(base_max, MAX_TRADE_SIZE)
+    if phase_num == 0: return base_min
+    learned_wr   = get_learned_win_rate(symbol, hour, direction)
+    score_factor = min((score - MIN_OPPORTUNITY_SCORE) / 10.0, 1.0)
+    edge_factor  = max(0.0, min((learned_wr - 0.40) / 0.30, 1.0))
+    streak       = brain.get("streak", 0)
+    if streak <= -3:   streak_factor = 0.6
+    elif streak <= -1: streak_factor = 0.8
+    elif streak >= 3:  streak_factor = 1.1
+    else:              streak_factor = 1.0
+    atr_factor = 1.0
+    if atr_pct is not None:
+        if atr_pct > 0.05:   atr_factor = 0.6
+        elif atr_pct > 0.03: atr_factor = 0.8
+    combined = (score_factor*0.5 + edge_factor*0.3 + 0.2) * atr_factor * streak_factor
+    size = round(base_min + combined * (base_max - base_min), 2)
+    return min(max(size, base_min), base_max)
+
+# ============================================================
+# TRADE GATE
+# ============================================================
+def should_enter_trade(symbol, hour, score, direction, regime, intel):
+    if regime.get("regime") == "UNKNOWN":
+        return False, "Regime still calculating — waiting for market assessment"
+    if time.time() < circuit_breaker_until:
+        mins_left = int((circuit_breaker_until - time.time()) / 60)
+        return False, "Circuit breaker active — " + str(mins_left) + "min left"
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if daily_loss_start["date"] == today and daily_loss_start["start_value"] > 0:
+        cur_val  = portfolio["balance"] + sum(s.get("position_size",0) for s in open_signals if s["status"]=="open")
+        drawdown = (daily_loss_start["start_value"] - cur_val) / daily_loss_start["start_value"]
+        if drawdown >= DAILY_DRAWDOWN_LIMIT:
+            return False, "Daily drawdown limit hit (" + str(round(drawdown*100,1)) + "%)"
+    total_value = portfolio["balance"] + sum(s.get("position_size",0) for s in open_signals if s["status"]=="open")
+    in_trades   = sum(s.get("position_size",0) for s in open_signals if s["status"]=="open")
+    if total_value > 0 and in_trades / total_value >= PORTFOLIO_HEAT_CAP:
+        return False, "Portfolio heat cap reached"
+    same_dir_count = len([s for s in open_signals if s["status"]=="open" and s.get("direction","long")==direction])
+    if same_dir_count >= CORRELATION_CAP:
+        return False, "Correlation cap: already " + str(same_dir_count) + " " + direction + " trades"
+    if intel:
+        if direction == "long"  and intel.get("block_long"):
+            return False, "Intel: " + intel.get("summary","longs blocked")[:80]
+        if direction == "short" and intel.get("block_short"):
+            return False, "Intel: " + intel.get("summary","shorts blocked")[:80]
+        if intel.get("btc_squeeze"):
+            return False, "BTC squeeze zone — all trades blocked"
+    max_l = regime.get("max_longs",  BULL_MAX_LONGS)
+    max_s = regime.get("max_shorts", BULL_MAX_SHORTS)
+    if direction == "long":
+        lc = len([s for s in open_signals if s["status"]=="open" and s.get("direction","long")=="long"])
+        if lc >= max_l: return False, "Regime slot limit: " + str(lc) + "/" + str(max_l) + " longs"
+    else:
+        sc = len([s for s in open_signals if s["status"]=="open" and s.get("direction","long")=="short"])
+        if sc >= max_s: return False, "Regime slot limit: " + str(sc) + "/" + str(max_s) + " shorts"
+    if any(s["symbol"]==symbol and s["status"]=="open" for s in open_signals):
+        return False, "Already have open trade on " + symbol
+    cooldown_until = brain["coin_stats"].get(symbol, {}).get("cooldown_until", 0)
+    if time.time() < cooldown_until:
+        mins_left = int((cooldown_until - time.time()) / 60)
+        return False, symbol + " on cooldown (" + str(mins_left) + "min left)"
+    phase_num, _ = get_learning_phase()
+    if phase_num >= 1:
+        learned_wr = get_learned_win_rate(symbol, hour, direction)
+        if learned_wr < MIN_WIN_RATE_TO_ENTER:
+            return False, "Learned WR too low (" + str(round(learned_wr*100)) + "% " + direction + ")"
+    if portfolio["balance"] < MIN_TRADE_SIZE:
+        return False, "Insufficient balance ($" + str(portfolio["balance"]) + ")"
+    btc = get_btc_24h_change()
+    if direction == "long"  and btc < -4.0: return False, "BTC dumping (" + str(round(btc,1)) + "%)"
+    if direction == "short" and btc >  4.0: return False, "BTC pumping (" + str(round(btc,1)) + "%)"
+    news_score, _ = get_news_sentiment(symbol)
+    if direction == "long"  and news_score <= -2: return False, "Bad news sentiment"
+    if direction == "short" and news_score >=  2: return False, "Good news — risky to short"
+    if phase_num == 2:
+        long_wr, short_wr, preferred = get_direction_bias()
+        if direction == "long"  and long_wr  < 0.35 and short_wr > long_wr  + 0.2:
+            return False, "Brain prefers shorts (long WR " + str(round(long_wr*100)) + "%)"
+        if direction == "short" and short_wr < 0.35 and long_wr  > short_wr + 0.2:
+            return False, "Brain prefers longs (short WR " + str(round(short_wr*100)) + "%)"
+    return True, "OK"
+
+def check_pending_limit_orders():
+    """UPDATED v4.1: When limit fills, immediately notify Sentinel via /filled."""
+    global pending_limit_orders
+    if not pending_limit_orders: return
+    now       = time.time()
+    remaining = []
+    for p in pending_limit_orders:
+        sym       = p["symbol"]
+        direction = p["direction"]
+        limit     = p["limit_entry"]
+        if now > p.get("expires", now+1):
+            broadcast("⌛ <b>Limit Order Expired: "+sym+" "+direction.upper()+"</b>"+chr(10)+
+                      "Price never reached $"+str(round(limit,6)))
+            logger.info("LIMIT EXPIRED: "+sym+" "+direction)
+            continue
+        try:
+            r    = requests.get("https://api.binance.com/api/v3/ticker/price",
+                                params={"symbol": sym+"USDT"}, timeout=5)
+            curr = float(r.json().get("price", 0)) if r.status_code==200 else 0
+        except: curr = 0
+        if not curr:
+            remaining.append(p); continue
+        filled = False
+        if direction == "long"  and curr <= limit * 1.002: filled = True
+        if direction == "short" and curr >= limit * 0.998: filled = True
+        if filled:
+            signal = {
+                "symbol": sym, "name": sym, "entry": curr,
+                "sl": p.get("stop",0), "tp1": p.get("tp1",0),
+                "tp2": p.get("tp2",0), "score": p.get("score",0),
+                "atr": 0, "atr_pct": 0, "key_tf": "1h",
+                "key_level": limit, "key_dist_pct": 0, "key_type": "support",
+                "limit_entry": limit  # NEW v4.1: store original limit level
+            }
+            pos_size = p.get("pos_size", 30)
+            save_signal(signal, pos_size, direction)
+
+            # NEW v4.1: Instantly tell Sentinel this filled — no more polling delay
+            notify_sentinel_fill(sym, direction, curr, limit,
+                                 p.get("stop",0), p.get("tp1",0), p.get("tp2",0))
+
+            broadcast("✅ <b>Limit Order FILLED: "+sym+" "+direction.upper()+"</b>"+chr(10)+
+                      "Entered at $"+str(round(curr,6))+chr(10)+
+                      "Target: $"+str(round(p.get("tp1",0),6))+" | Stop: $"+str(round(p.get("stop",0),6)))
+            logger.info("LIMIT FILLED: "+sym+" "+direction+" at "+str(curr))
+        else:
+            remaining.append(p)
+    pending_limit_orders[:] = remaining
+    save_json_data("pending_limit_orders.json", pending_limit_orders)
+
+# ============================================================
+# ENTRY TIMING CONFIRMATION LAYER
+# ============================================================
+# Bot1 is good at finding setups but bad at timing — it sends signals
+# as soon as a setup is detected, even if price has already moved away
+# from support. This causes "stop above support" rejections from Sentinel.
+#
+# This layer holds signals until price actually confirms at the level:
+# 1. Support interaction in last 3 candles (wick or close near level)
+# 2. Confirmation candle (bullish close or rejection wick)
+# 3. Volume supporting the move (not dead volume)
+# 4. Time decay — signal must be sent within 2 candles of confirmation
+#
+# Setups that don't confirm within 2 cycles (30min) are discarded.
+# ============================================================
+pending_setups = {}  # key: "SYMBOL_direction" → {opp, cycles, first_seen}
+
+def check_entry_timing(symbol, direction, support_level):
+    """
+    Returns (confirmed: bool, reason: str)
+    Fetches fresh 15min candles and checks for confirmation at support.
+    """
+    try:
+        r = requests.get("https://api.binance.com/api/v3/klines",
+                         params={"symbol": symbol+"USDT", "interval": "15m", "limit": 15},
+                         timeout=8)
+        if r.status_code != 200: return False, "Candle fetch failed"
+        candles = r.json()
+        if len(candles) < 5: return False, "Not enough candles"
+
+        # Parse last 5 candles: [open, high, low, close, volume]
+        parsed = [(float(c[1]), float(c[2]), float(c[3]), float(c[4]), float(c[5]))
+                  for c in candles[-5:]]
+        volumes = [float(c[5]) for c in candles[:-1]]  # exclude current
+        avg_vol = sum(volumes[-10:]) / len(volumes[-10:]) if len(volumes) >= 10 else sum(volumes) / len(volumes)
+
+        current = parsed[-1]   # most recent closed candle
+        prev    = parsed[-2]   # candle before that
+        c_open, c_high, c_low, c_close, c_vol = current
+        p_open, p_high, p_low, p_close, p_vol = prev
+
+        if direction == "long":
+            if not support_level or support_level <= 0:
+                return False, "No support level known"
+
+            # ── CHECK 1: Support interaction in last 3 candles ───────────
+            # Price must have touched or come within 0.8% of support recently
+            interaction = False
+            for candle in parsed[-3:]:
+                o2, h2, l2, cl2, v2 = candle
+                if l2 <= support_level * 1.008:  # wick or close within 0.8% of support
+                    interaction = True
+                    break
+            if not interaction:
+                return False, "Price not interacting with support (too far above)"
+
+            # ── CHECK 2: Confirmation candle ─────────────────────────────
+            # Valid: bullish close (close > open) with close in upper 50% of range
+            # OR:   strong rejection wick (lower wick > 60% of total candle size)
+            candle_range = c_high - c_low if c_high > c_low else 0.0001
+            lower_wick   = min(c_open, c_close) - c_low
+            upper_body   = c_close - c_open
+
+            bullish_close  = c_close > c_open and (c_close - c_low) > candle_range * 0.5
+            rejection_wick = lower_wick > candle_range * 0.6
+
+            # Also check previous candle if current is too new
+            p_range      = p_high - p_low if p_high > p_low else 0.0001
+            p_lower_wick = min(p_open, p_close) - p_low
+            prev_bullish = p_close > p_open and (p_close - p_low) > p_range * 0.5
+            prev_wick    = p_lower_wick > p_range * 0.6
+
+            if not (bullish_close or rejection_wick or prev_bullish or prev_wick):
+                return False, "No confirmation candle (no bullish close or rejection wick)"
+
+            # ── CHECK 3: Volume ──────────────────────────────────────────
+            # Volume must be at least 0.8x average — not dead volume
+            # Use the candle that had the confirmation
+            confirm_vol = c_vol if (bullish_close or rejection_wick) else p_vol
+            if avg_vol > 0 and confirm_vol < avg_vol * 0.8:
+                return False, "Volume too low on confirmation candle"
+
+            return True, "✅ Confirmed: support interaction + confirmation candle + volume"
+
+        elif direction == "short":
+            # Mirror logic for shorts — resistance level needed
+            resistance = support_level  # for shorts, sentinel passes resistance as the level
+            if not resistance or resistance <= 0:
+                return False, "No resistance level known"
+
+            interaction = False
+            for candle in parsed[-3:]:
+                o2, h2, l2, cl2, v2 = candle
+                if h2 >= resistance * 0.992:  # wick touched resistance within 0.8%
+                    interaction = True
+                    break
+            if not interaction:
+                return False, "Price not interacting with resistance"
+
+            candle_range  = c_high - c_low if c_high > c_low else 0.0001
+            upper_wick    = c_high - max(c_open, c_close)
+            bearish_close = c_close < c_open and (c_high - c_close) > candle_range * 0.5
+            rejection_wick_short = upper_wick > candle_range * 0.6
+
+            p_range_s    = p_high - p_low if p_high > p_low else 0.0001
+            p_upper_wick = p_high - max(p_open, p_close)
+            prev_bearish = p_close < p_open and (p_high - p_close) > p_range_s * 0.5
+            prev_wick_s  = p_upper_wick > p_range_s * 0.6
+
+            if not (bearish_close or rejection_wick_short or prev_bearish or prev_wick_s):
+                return False, "No confirmation candle (no bearish close or rejection wick)"
+
+            confirm_vol = c_vol if (bearish_close or rejection_wick_short) else p_vol
+            if avg_vol > 0 and confirm_vol < avg_vol * 0.8:
+                return False, "Volume too low on confirmation candle"
+
+            return True, "✅ Confirmed: resistance interaction + confirmation candle + volume"
+
+        return False, "Unknown direction"
+
+    except Exception as e:
+        logger.error("Entry timing check: "+str(e))
+        return False, "Timing check error"
+
+def check_sentinel_approval(signal, direction):
+    try:
+        payload = {
+            "symbol":    signal["symbol"],
+            "direction": direction,
+            "score":     signal.get("score", 0),
+            "entry":     signal.get("entry", 0),
+            "tp1":       signal.get("tp1", 0),
+            "tp2":       signal.get("tp2", 0),
+            "sl":        signal.get("sl", 0),
+        }
+        logger.info("Asking Sentinel about " + signal["symbol"] + " " + direction.upper() + "…")
+        r = requests.post(SENTINEL_URL, json=payload, timeout=SENTINEL_TIMEOUT)
+        if r.status_code == 200:
+            verdict  = r.json()
+            approved = verdict.get("approved", False)
+            score    = verdict.get("score", 0)
+            total    = verdict.get("total", 7)
+            if approved:
+                s_entry = verdict.get("entry", 0)
+                s_stop  = verdict.get("stop", 0)
+                s_tp1   = verdict.get("tp1", 0)
+                s_tp2   = verdict.get("tp2", 0)
+                if s_entry > 0 and s_stop > 0 and s_tp1 > 0:
+                    signal["entry"]       = s_entry
+                    signal["sl"]          = s_stop
+                    signal["tp1"]         = s_tp1
+                    signal["tp2"]         = s_tp2
+                    signal["limit_entry"] = s_entry   # NEW v4.1: track Sentinel's level
+                    logger.info("Using Sentinel levels: entry="+str(s_entry)+" stop="+str(s_stop)+" tp1="+str(s_tp1))
+            return approved, "✅ Sentinel approved (" + str(score) + "/" + str(total) + ")" if approved else "❌ Sentinel rejected (" + str(score) + "/" + str(total) + ")"
+        else:
+            logger.error("Sentinel returned status: " + str(r.status_code))
+            return False, "Sentinel error — blocking for safety"
+    except requests.exceptions.Timeout:
+        logger.error("Sentinel timeout after " + str(SENTINEL_TIMEOUT) + "s")
+        return False, "Sentinel timeout — blocking for safety"
+    except Exception as e:
+        logger.error("Sentinel connection error: " + str(e))
+        return False, "Sentinel offline — blocking for safety"
+
+def save_signal(signal, position_size=None, direction="long"):
+    global open_signals, portfolio
+    entry_hour = datetime.now(timezone.utc).hour
+    if position_size is None:
+        atr_pct = signal.get("atr", 0) / signal["entry"] if signal.get("atr") else None
+        position_size = calc_position_size(signal.get("score", MIN_OPPORTUNITY_SCORE),
+                                           signal["symbol"], entry_hour, direction, atr_pct)
+    open_signals.append({
+        "symbol":        signal["symbol"],
+        "name":          signal.get("name", signal["symbol"]),
+        "entry":         signal["entry"],
+        "tp1":           signal["tp1"],
+        "tp2":           signal["tp2"],
+        "sl":            signal["sl"],
+        "atr":           signal.get("atr", 0),
+        "position_size": position_size,
+        "direction":     direction,
+        "tp1_hit":       False,
+        "remaining_size": position_size,
+        "timestamp":     datetime.now(timezone.utc).isoformat(),
+        "date":          datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "entry_hour":    entry_hour,
+        "status":        "open",
+        "peak_price":    signal["entry"],
+        "peak_pnl_pct":  0.0,
+        "exit_reason":   "",
+        "key_tf":        signal.get("key_tf", "unknown"),
+        "key_level":     signal.get("key_level", 0),
+        "key_dist_pct":  signal.get("key_dist_pct", 0),
+        "key_type":      signal.get("key_type", "unknown"),
+        "limit_entry":   signal.get("limit_entry", signal["entry"]),  # NEW v4.1
+    })
+    portfolio["balance"]        = round(portfolio["balance"] - position_size, 2)
+    portfolio["total_invested"] = round(portfolio["total_invested"] + position_size, 2)
+    portfolio["trade_count"]   += 1
+    save_json_data("open_signals.json", open_signals)
+    save_json_data("portfolio.json",    portfolio)
+
+# ============================================================
+# SIGNAL TRACKING
+# ============================================================
+def track_open_signals():
+    global open_signals, daily_history, portfolio
+    if not open_signals: return
+    updated = []
+    for sig in open_signals:
+        if sig["status"] != "open":
+            updated.append(sig); continue
+        price = get_current_price(sig["symbol"])
+        if price is None:
+            updated.append(sig); continue
+
+        direction  = sig.get("direction", "long")
+        pos        = sig.get("position_size", MIN_TRADE_SIZE)
+        remaining  = sig.get("remaining_size", pos)
+        tp1_hit    = sig.get("tp1_hit", False)
+        atr        = sig.get("atr", 0)
+        result     = None
+        result_msg = None
+
+        # Stale trade exit
+        if not tp1_hit and sig.get("timestamp"):
+            try:
+                entry_time = datetime.fromisoformat(sig["timestamp"])
+                hours_open = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
+                if hours_open >= STALE_TRADE_HOURS:
+                    pnl_dollar = round(remaining * (price - sig["entry"]) / sig["entry"] if direction=="long"
+                                       else remaining * (sig["entry"] - price) / sig["entry"], 2)
+                    result  = "WIN_TP1" if pnl_dollar > 0 else "LOSS"
+                    new_bal = round(portfolio["balance"] + remaining + pnl_dollar, 2)
+                    result_msg = ("⏰ <b>STALE TRADE CLOSED — " + sig["symbol"] + "</b>" + chr(10) +
+                                  "Open for " + str(round(hours_open, 1)) + "h without TP1." + chr(10) +
+                                  "P&L: " + ("+" if pnl_dollar >= 0 else "") + str(pnl_dollar) + "$")
+            except Exception: pass
+
+        if direction == "long":
+            pct_gain   = round(((price - sig["entry"]) / sig["entry"]) * 100, 2)
+            pnl_dollar = round(remaining * (price - sig["entry"]) / sig["entry"], 2)
+            tp1_cond   = price >= sig["tp1"] and not tp1_hit
+            tp2_cond   = price >= sig["tp2"]
+            sl_cond    = price <= sig["sl"]
+        else:
+            pct_gain   = round(((sig["entry"] - price) / sig["entry"]) * 100, 2)
+            pnl_dollar = round(remaining * (sig["entry"] - price) / sig["entry"], 2)
+            tp1_cond   = price <= sig["tp1"] and not tp1_hit
+            tp2_cond   = price <= sig["tp2"]
+            sl_cond    = price >= sig["sl"]
+
+        dir_icon  = "📈" if direction == "long" else "📉"
+        dir_label = "LONG" if direction == "long" else "SHORT"
+
+        if price:
+            if direction == "long":
+                if price > sig.get("peak_price", sig["entry"]):
+                    sig["peak_price"]   = price
+                    sig["peak_pnl_pct"] = round(((price-sig["entry"])/sig["entry"])*100, 2)
+            else:
+                if price < sig.get("peak_price", sig["entry"]):
+                    sig["peak_price"]   = price
+                    sig["peak_pnl_pct"] = round(((sig["entry"]-price)/sig["entry"])*100, 2)
+
+        if tp1_hit and atr > 0:
+            if direction == "long":
+                nt = price - atr * ATR_TRAIL_MULTIPLIER
+                if nt > sig["sl"]: sig["sl"] = nt
+            else:
+                nt = price + atr * ATR_TRAIL_MULTIPLIER
+                if nt < sig["sl"]: sig["sl"] = nt
+
+        if tp1_cond and not tp2_cond:
+            partial_size = round(remaining * PARTIAL_TP_PERCENT, 2)
+            partial_pnl  = round(partial_size * abs(pct_gain) / 100, 2)
+            sig["tp1_hit"]        = True
+            sig["remaining_size"] = round(remaining - partial_size, 2)
+            if atr > 0:
+                sig["sl"] = (price - atr*ATR_TRAIL_MULTIPLIER if direction=="long"
+                             else price + atr*ATR_TRAIL_MULTIPLIER)
+            else:
+                sig["sl"] = sig["entry"]
+            portfolio["balance"]   = round(portfolio["balance"] + partial_size + partial_pnl, 2)
+            portfolio["total_pnl"] = round(portfolio["total_pnl"] + partial_pnl, 2)
+            save_json_data("portfolio.json", portfolio)
+            broadcast(dir_icon + " <b>" + sig["symbol"] + "/USDT — " + dir_label + "</b>" + chr(10) +
+                      "✅ <b>TP1 HIT — Partial profit locked!</b>" + chr(10) +
+                      "📍 Entry: $" + str(round(sig["entry"],6)) + chr(10) +
+                      "💰 Price: $" + str(round(price,6)) + chr(10) +
+                      "📊 Gain: +" + str(pct_gain) + "%" + chr(10) +
+                      "💵 Profit taken (50%): +" + str(partial_pnl) + "$" + chr(10) +
+                      "🔒 ATR trailing stop: $" + str(round(sig["sl"],6)) + chr(10) +
+                      "🏃 Remaining → TP2: $" + str(round(sig["tp2"],6)))
+            updated.append(sig); continue
+
+        if tp2_cond:
+            result     = "WIN_TP2"
+            new_bal    = round(portfolio["balance"] + remaining + pnl_dollar, 2)
+            result_msg = (dir_icon + " <b>" + sig["symbol"] + "/USDT — " + dir_label + "</b>" + chr(10) +
+                          "✅ <b>TP2 HIT — FULL WIN!</b>" + chr(10) +
+                          "📍 Entry: $" + str(round(sig["entry"],6)) + chr(10) +
+                          "💰 Price: $" + str(round(price,6)) + chr(10) +
+                          "💵 P&L: +" + str(pnl_dollar) + "$" + chr(10) +
+                          "🏦 Balance: $" + str(new_bal))
+        elif sl_cond:
+            result  = "WIN_TP1" if pnl_dollar > 0 else "LOSS"
+            new_bal = round(portfolio["balance"] + remaining + pnl_dollar, 2)
+            peak    = sig.get("peak_pnl_pct", 0)
+            if sig.get("tp1_hit"):
+                outcome = "TRAILING STOP — TP1 profit secured"
+                sig["exit_reason"] = "TRAILING_STOP"
+            elif peak > 0.5:
+                outcome = "STOP LOSS HIT (after +" + str(peak) + "% peak)"
+                sig["exit_reason"] = "STOP_AFTER_PROFIT"
+            else:
+                outcome = "STOP LOSS HIT"
+                sig["exit_reason"] = "STOP_IMMEDIATE"
+            result_msg = ("🛑 <b>" + sig["symbol"] + "/USDT — " + dir_label + "</b>" + chr(10) +
+                          "❌ <b>" + outcome + "</b>" + chr(10) +
+                          "📍 Entry: $" + str(round(sig["entry"],6)) + chr(10) +
+                          "🛑 Stop:  $" + str(round(sig["sl"],6)) + chr(10) +
+                          "💰 Price: $" + str(round(price,6)) + chr(10) +
+                          "💵 P&L:   " + ("+" if pnl_dollar>=0 else "") + str(pnl_dollar) + "$" + chr(10) +
+                          "🏦 Balance: $" + str(new_bal))
+
+        if result:
+            sig["status"]      = result
+            sig["close_price"] = price
+            sig["close_time"]  = datetime.now(timezone.utc).isoformat()
+            sig["pnl"]         = pnl_dollar
+            portfolio["balance"]   = round(portfolio["balance"] + remaining + pnl_dollar, 2)
+            portfolio["total_pnl"] = round(portfolio["total_pnl"] + pnl_dollar, 2)
+            save_json_data("portfolio.json", portfolio)
+            # UPDATED v4.1: pass limit_entry so Sentinel gets accurate fill distance
+            record_trade_outcome(
+                sig["symbol"],
+                sig.get("entry_hour", datetime.now(timezone.utc).hour),
+                result, pnl_dollar,
+                sig.get("direction", "long"),
+                limit_entry=sig.get("limit_entry", sig.get("entry", 0))
+            )
+            broadcast(result_msg)
+            date_key = sig["date"]
+            if date_key not in daily_history:
+                daily_history[date_key] = {"wins": 0, "losses": 0, "signals": []}
+            if "WIN" in result: daily_history[date_key]["wins"]   += 1
+            else:               daily_history[date_key]["losses"] += 1
+            daily_history[date_key]["signals"].append({
+                "symbol": sig["symbol"], "result": result,
+                "entry": sig["entry"], "close_price": price, "pnl": pnl_dollar
+            })
+            save_json_data("daily_history.json", daily_history)
+        updated.append(sig)
+    open_signals = updated
+    save_json_data("open_signals.json", open_signals)
+
+# ============================================================
+# MULTI-TIMEFRAME PICTURE
+# ============================================================
+def get_timeframe_bias(symbol, interval, limit=210):
+    try:
+        r    = requests.get("https://api.binance.com/api/v3/klines",
+                            params={"symbol":symbol+"USDT","interval":interval,"limit":limit}, timeout=10)
+        data = r.json()
+        if not isinstance(data, list) or len(data) < 30: return None
+        closes  = [float(c[4]) for c in data]
+        volumes = [float(c[5]) for c in data]
+        rsi     = calc_rsi_wilder(closes)
+        ema9    = calc_ema(closes, 9); ema21 = calc_ema(closes, 21)
+        ema200  = calc_ema(closes, 200) if len(closes) >= 200 else None
+        avg_vol   = sum(volumes[-21:-1]) / 20 if len(volumes) > 20 else 1
+        vol_ratio = volumes[-1] / avg_vol if avg_vol > 0 else 1.0
+        cur       = closes[-1]
+        above_200 = ema200 is not None and cur > ema200[-1]
+        bv = 0; bev = 0
+        if above_200:            bv += 2
+        else:                    bev += 2
+        if ema9[-1] > ema21[-1]: bv += 1
+        else:                    bev += 1
+        if rsi > 50:             bv += 1
+        else:                    bev += 1
+        trend = "bullish" if bv >= 3 else ("bearish" if bev >= 3 else "sideways")
+        return {"trend": trend, "rsi": round(rsi,1),
+                "vol_ratio": round(vol_ratio,2), "above_200": above_200, "close": cur}
+    except Exception as e:
+        logger.error("TF bias " + symbol + " " + interval + ": " + str(e)); return None
+
+def get_full_picture(symbol):
+    daily = get_timeframe_bias(symbol, "1d")
+    h4    = get_timeframe_bias(symbol, "4h")
+    h1    = get_timeframe_bias(symbol, "1h")
+    m15   = get_timeframe_bias(symbol, "15m")
+    bull_count = 0; bear_count = 0; tf_summary = ""
+    nl = chr(10)
+    for name, tf in [("Daily",daily),("4H",h4),("1H",h1),("15min",m15)]:
+        if tf is None:
+            tf_summary += name + ": ❓ No data" + nl; continue
+        ei = "✅200" if tf.get("above_200") else "❌200"
+        if tf["trend"] == "bullish":
+            bull_count += 1
+            tf_summary += name + ": 🟢 Bullish RSI " + str(tf["rsi"]) + " " + ei + nl
+        elif tf["trend"] == "bearish":
+            bear_count += 1
+            tf_summary += name + ": 🔴 Bearish RSI " + str(tf["rsi"]) + " " + ei + nl
+        else:
+            tf_summary += name + ": 🟡 Sideways RSI " + str(tf["rsi"]) + " " + ei + nl
+    if bull_count >= 3:
+        sc=1; conf="🟢 STRONG — Full alignment"; adv="All timeframes agree. Targeting TP2."
+    elif bull_count == 2:
+        sc=2; conf="🟡 MODERATE — Mixed"; adv="Partial agreement. Taking TP1 then trailing."
+    elif bull_count == 1 and bear_count <= 2:
+        sc=3; conf="🟠 LOW — Counter trend"; adv="Quick scalp. Very tight stop."
+    else:
+        sc=4; conf="🔴 SKIP"; adv="Not entering. Market misaligned."
+    return {"scenario":sc,"confidence":conf,"advice":adv,"tf_summary":tf_summary,
+            "bull_count":bull_count,"bear_count":bear_count,
+            "daily":daily,"h4":h4,"h1":h1,"m15":m15}
+
+# ============================================================
+# LONG ANALYSIS — with Sentinel weight awareness
+# ============================================================
+def analyze(symbol, coin_data, regime, intel=None):
+    raw = get_klines(symbol, "1h", 210)
+    if not raw or len(raw) < 50: return None
+    closes  = [float(c[4]) for c in raw]; highs = [float(c[2]) for c in raw]
+    lows    = [float(c[3]) for c in raw]; volumes = [float(c[5]) for c in raw]
+    cur     = closes[-1]
+    rsi     = calc_rsi_wilder(closes); rsi_series = calc_rsi_series(closes)
+    macd    = calc_macd(closes);       atr = calc_atr(highs, lows, closes)
+    bbu, bbm, bbl = calc_bollinger_bands(closes)
+    vd      = calc_volume_delta(raw)
+    mst     = detect_market_structure(highs, lows)
+    res, sup= find_key_levels(highs, lows, closes)
+    div     = detect_rsi_divergence(closes, rsi_series)
+    vwap, vwap_pos = calc_vwap(raw)
+    obv_trend, obv_div = calc_obv(closes, volumes)
+    liq_sweep = detect_liquidity_sweep(highs, lows, closes)
+    ema9    = calc_ema(closes, 9);   ema21 = calc_ema(closes, 21)
+    ema200  = calc_ema(closes, 200) if len(closes) >= 200 else None
+    avg_vol = sum(volumes[-21:-1]) / 20 if len(volumes) > 20 else 1
+    vol_r   = volumes[-1] / avg_vol if avg_vol > 0 else 1.0
+    ab200   = ema200 is not None and cur > ema200[-1]
+    score   = 0; signals = []
+
+    # ── NEW v4.1: Read Sentinel's check weights to adjust scoring emphasis ──
+    # If Sentinel trusts "structure" (weight > 1.5), we require it to pass.
+    # If Sentinel distrusts "rsi_confluence" (weight < 0.8), we're more lenient.
+    sent_weights    = get_sentinel_weights()
+    structure_trust = sent_weights.get("structure", 1.0)
+    rsi_trust       = sent_weights.get("rsi_confluence", 1.0)
+    volume_trust    = sent_weights.get("volume_profile", 1.0)
+    # ────────────────────────────────────────────────────────────────────────
+
+    if ab200:  score += 2; signals.append("📊 Above 200 EMA — macro uptrend")
+    else:      score -= 3
+
+    if vwap is not None:
+        if cur > vwap:
+            score += 2; signals.append("📊 Above VWAP (" + str(round(vwap_pos, 2)) + "% above)")
+        elif vwap_pos < -2:
+            score += 1; signals.append("📊 Deep below VWAP — mean reversion zone")
+
+    if liq_sweep == "bullish_sweep":
+        score += 4; signals.append("🎯 Bullish liquidity sweep — stops hunted, reversal likely")
+
+    if cur > res and closes[-2] < res:
+        if vol_r >= VOLUME_SPIKE_RATIO and vd > 0.55:
+            score += 4; signals.append("🚀 Confirmed breakout with buying volume (" + str(round(vol_r,1)) + "x)")
+        else:
+            score += 2; signals.append("🚀 Breakout above resistance")
+
+    if macd[0] is not None:
+        ml,slv,hist,pml,psl = macd
+        if ml > slv and pml <= psl:
+            score += 3; signals.append("📈 MACD bullish crossover")
+        elif ml > slv and hist > 0:
+            score += 2; signals.append("📈 MACD bullish confirmed")
+
+    if rsi < 30:   score += 3; signals.append("💹 RSI deeply oversold (" + str(rsi) + ")")
+    elif rsi < RSI_OVERSOLD_LEVEL:
+        score += 2; signals.append("💹 RSI oversold (" + str(rsi) + ")")
+    elif rsi > 75: score -= 2
+
+    if div == "bullish": score += 3; signals.append("🔀 Bullish RSI divergence")
+
+    if obv_div == "bullish":
+        score += 3; signals.append("📦 OBV bullish divergence — smart money accumulating")
+    elif obv_trend == "rising" and not obv_div:
+        score += 1; signals.append("📦 OBV rising")
+
+    if bbl is not None:
+        if cur <= bbl:        score += 2; signals.append("📉 At lower Bollinger Band")
+        elif cur <= bbl*1.015: score += 1; signals.append("📉 Near lower Bollinger Band")
+
+    if vol_r >= VOLUME_SPIKE_RATIO:
+        if vd > 0.62:   score += 3; signals.append("💪 Strong buying pressure (" + str(round(vol_r,1)) + "x)")
+        elif vd > 0.52: score += 2; signals.append("📈 Volume spike " + str(round(vol_r,1)) + "x")
+        elif vd < 0.45: score -= 1
+
+    if len(ema9) > 1 and len(ema21) > 1:
+        if ema9[-1] > ema21[-1] and ema9[-2] <= ema21[-2]:
+            score += 3; signals.append("⚡ EMA9 crossed above EMA21")
+        elif ema9[-1] > ema21[-1]:
+            score += 1; signals.append("📊 EMA9 above EMA21")
+
+    if mst == "uptrend":
+        score += 2; signals.append("🏗️ HH/HL market structure confirmed")
+    elif mst == "downtrend": score -= 1
+
+    ch24 = coin_data.get("change_24h", 0)
+    if ch24 > 5: score += 1; signals.append("🔥 +" + str(round(ch24,1)) + "% past 24h")
+
+    session_mod    = intel.get("session_mod", 0) if intel else 0
+    # Cap total boost at 2 — prevents stacking of regime+session making /scan always empty
+    regime_boost   = min(regime.get("score_boost", 0), 2)
+    session_cap    = min(session_mod, 1) if regime_boost >= 2 else session_mod
+    required_score = MIN_OPPORTUNITY_SCORE + regime_boost + session_cap
+    if score < required_score or len(signals) < MIN_SIGNALS_REQUIRED: return None
+
+    # Sentinel knowledge boost (applied AFTER required_score check so it can rescue borderline signals)
+    sent_sup = 0  # initialize so it can be returned even if request fails
+    try:
+        sk = requests.get(SENTINEL_URL.replace("/analyse","/knowledge/"+symbol), timeout=3)
+        if sk.status_code == 200:
+            sent_know = sk.json()
+            sent_sup  = sent_know.get("support", 0)
+            sent_bias = sent_know.get("overall_bias", "NEUTRAL")
+            if sent_sup and sent_bias != "BEARISH":
+                dist_to_sup = abs(cur - sent_sup) / cur * 100
+                if dist_to_sup < 1.0:
+                    score += 4; signals.append("🎯 At Sentinel support $"+str(round(sent_sup,4)))
+                elif dist_to_sup < 2.0:
+                    score += 2; signals.append("📍 Near Sentinel support $"+str(round(sent_sup,4)))
+            if sent_bias == "BULLISH":
+                score += 2; signals.append("🧠 Sentinel bias: BULLISH")
+            elif sent_bias == "BEARISH":
+                score -= 3
+    except Exception: pass
+
+    # ENTRY CONFIRMATION GATE: applied in main loop where direction is known.
+    vol_ok, vol_count, vol_detail = check_volume_alignment(symbol)
+    if not vol_ok and score < required_score + 4: return None
+
+    picture = get_full_picture(symbol)
+    if picture["scenario"] == 4: return None
+
+    entry      = cur
+    sweep_data = detect_sweep_and_retest(symbol, "long")
+    mtf_levels = get_mtf_levels(symbol, cur)
+    res_levels = sorted([l for l in mtf_levels if l["type"]=="resistance"], key=lambda x: x["dist_pct"])
+    sup_levels = sorted([l for l in mtf_levels if l["type"]=="support"],    key=lambda x: x["dist_pct"])
+
+    if sweep_data and sweep_data["retest_confirmed"]:
+        sl        = sweep_data["wick_extreme"] * 0.995
+        key_tf    = sweep_data["tf"]
+        key_level = sweep_data["wick_extreme"]
+        signals.append("🎯 Liquidity sweep + retest confirmed")
+    else:
+        best_sup_stop = sup_levels[0]["level"] if sup_levels else None
+        sl        = (best_sup_stop * 0.992) if best_sup_stop else max(entry - atr*ATR_SL_MULTIPLIER, sup*0.99)
+        key_tf    = sup_levels[0]["tf"]    if sup_levels else "1H"
+        key_level = sup_levels[0]["level"] if sup_levels else sup
+
+    risk = max(entry - sl, entry*0.005)
+    if len(res_levels) >= 2:
+        tp1 = res_levels[0]["level"] * 0.995
+        tp2 = res_levels[1]["level"] * 0.995
+    elif len(res_levels) == 1:
+        tp1 = res_levels[0]["level"] * 0.995
+        tp2 = entry + risk * 3.0
+    else:
+        tp1 = entry + risk * 2.0
+        tp2 = entry + risk * 4.0
+
+    if tp1 <= entry: tp1 = entry + risk * 2.0
+    if tp2 <= tp1:   tp2 = tp1  + risk * 2.0
+
+    rr = (tp1 - entry) / risk if risk > 0 else 0
+    if rr < MIN_RISK_REWARD: return None
+
+    conf = "🟢 STRONG" if score >= 12 else ("🟡 MODERATE" if score >= 8 else "🔴 WATCH")
+    return {
+        "symbol": symbol, "name": coin_data.get("name", symbol),
+        "price": cur, "entry": entry, "tp1": tp1, "tp2": tp2, "sl": sl,
+        "rsi": rsi, "vol_ratio": vol_r, "vol_delta": vd, "vol_detail": vol_detail,
+        "signals": signals, "score": score, "confidence": conf,
+        "atr": atr, "atr_pct": round(atr/entry*100, 2),
+        "above_200": ab200, "market_structure": mst, "divergence": div,
+        "risk_reward": round(rr, 2),
+        "market_cap": coin_data.get("market_cap", 0),
+        "volume_24h": coin_data.get("volume_24h", 0),
+        "direction": "long", "picture": picture,
+        "key_tf": key_tf, "key_level": round(key_level, 6),
+        "key_dist_pct": round(sup_levels[0]["dist_pct"] if sup_levels else 0, 3),
+        "key_type": "support",
+        "sentinel_support": sent_sup,  # used by timing gate for accurate proximity check
+    }
+
+# ============================================================
+# SHORT ANALYSIS — with Sentinel weight awareness
+# ============================================================
+def analyze_short(symbol, coin_data, regime, intel=None):
+    raw = get_klines(symbol, "1h", 210)
+    if not raw or len(raw) < 50: return None
+    closes  = [float(c[4]) for c in raw]; highs = [float(c[2]) for c in raw]
+    lows    = [float(c[3]) for c in raw]; volumes = [float(c[5]) for c in raw]
+    cur     = closes[-1]
+    rsi     = calc_rsi_wilder(closes); rsi_series = calc_rsi_series(closes)
+    macd    = calc_macd(closes);       atr = calc_atr(highs, lows, closes)
+    bbu, bbm, bbl = calc_bollinger_bands(closes)
+    vd      = calc_volume_delta(raw)
+    mst     = detect_market_structure(highs, lows)
+    res, sup= find_key_levels(highs, lows, closes)
+    div     = detect_rsi_divergence(closes, rsi_series)
+    vwap, vwap_pos = calc_vwap(raw)
+    obv_trend, obv_div = calc_obv(closes, volumes)
+    liq_sweep = detect_liquidity_sweep(highs, lows, closes)
+    ema9    = calc_ema(closes, 9); ema21 = calc_ema(closes, 21)
+    ema200  = calc_ema(closes, 200) if len(closes) >= 200 else None
+    avg_vol = sum(volumes[-21:-1]) / 20 if len(volumes) > 20 else 1
+    vol_r   = volumes[-1] / avg_vol if avg_vol > 0 else 1.0
+    bel200  = ema200 is not None and cur < ema200[-1]
+    score   = 0; signals = []
+
+    sent_weights    = get_sentinel_weights()
+    structure_trust = sent_weights.get("structure", 1.0)
+    rsi_trust       = sent_weights.get("rsi_confluence", 1.0)
+    volume_trust    = sent_weights.get("volume_profile", 1.0)
+
+    if bel200: score += 2; signals.append("📊 Below 200 EMA — macro downtrend")
+    else:      score -= 3
+
+    if vwap is not None:
+        if cur < vwap:
+            score += 2; signals.append("📊 Below VWAP (" + str(round(vwap_pos, 2)) + "% below)")
+        elif vwap_pos > 2:
+            score += 1; signals.append("📊 Deep above VWAP — mean reversion zone")
+
+    if liq_sweep == "bearish_sweep":
+        score += 4; signals.append("🎯 Bearish liquidity sweep — reversal likely")
+
+    if cur < sup and closes[-2] > sup:
+        if vol_r >= VOLUME_SPIKE_RATIO and vd < 0.45:
+            score += 4; signals.append("🔻 Confirmed breakdown with selling volume (" + str(round(vol_r,1)) + "x)")
+        else:
+            score += 2; signals.append("🔻 Breakdown below support")
+
+    if macd[0] is not None:
+        ml,slv,hist,pml,psl = macd
+        if ml < slv and pml >= psl:
+            score += 3; signals.append("📉 MACD bearish crossover")
+        elif ml < slv and hist < 0:
+            score += 2; signals.append("📉 MACD bearish confirmed")
+
+    if rsi > 75:   score += 3; signals.append("📈 RSI deeply overbought (" + str(rsi) + ")")
+    elif rsi > RSI_OVERBOUGHT_LEVEL:
+        score += 2; signals.append("📈 RSI overbought (" + str(rsi) + ")")
+    elif rsi < 30: score -= 2
+
+    if div == "bearish": score += 3; signals.append("🔀 Bearish RSI divergence")
+
+    if obv_div == "bearish":
+        score += 3; signals.append("📦 OBV bearish divergence — smart money distributing")
+    elif obv_trend == "falling" and not obv_div:
+        score += 1; signals.append("📦 OBV falling")
+
+    if bbu is not None:
+        if cur >= bbu:         score += 2; signals.append("📈 At upper Bollinger Band")
+        elif cur >= bbu*0.985: score += 1; signals.append("📈 Near upper Bollinger Band")
+
+    if vol_r >= VOLUME_SPIKE_RATIO:
+        if vd < 0.38:   score += 3; signals.append("💪 Strong selling pressure (" + str(round(vol_r,1)) + "x)")
+        elif vd < 0.48: score += 2; signals.append("📉 Volume spike on drop")
+        elif vd > 0.55: score -= 1
+
+    if len(ema9) > 1 and len(ema21) > 1:
+        if ema9[-1] < ema21[-1] and ema9[-2] >= ema21[-2]:
+            score += 3; signals.append("⚡ EMA9 crossed below EMA21")
+        elif ema9[-1] < ema21[-1]:
+            score += 1; signals.append("📊 EMA9 below EMA21")
+
+    if mst == "downtrend":
+        score += 2; signals.append("🏗️ LH/LL market structure confirmed")
+    elif mst == "uptrend": score -= 1
+
+    ch24 = coin_data.get("change_24h", 0)
+    if ch24 < -5: score += 1; signals.append("🔥 " + str(round(ch24,1)) + "% selling pressure 24h")
+
+    session_mod    = intel.get("session_mod", 0) if intel else 0
+    regime_boost   = min(regime.get("score_boost", 0), 2)
+    session_cap    = min(session_mod, 1) if regime_boost >= 2 else session_mod
+    required_score = MIN_OPPORTUNITY_SCORE + regime_boost + session_cap
+    if score < required_score or len(signals) < MIN_SIGNALS_REQUIRED: return None
+
+    sent_res = 0  # initialize for return dict — used by timing gate
+    try:
+        sk = requests.get(SENTINEL_URL.replace("/analyse","/knowledge/"+symbol), timeout=3)
+        if sk.status_code == 200:
+            sent_know = sk.json()
+            sent_res  = sent_know.get("resistance", 0)
+            sent_bias = sent_know.get("overall_bias", "NEUTRAL")
+            if sent_res and sent_bias != "BULLISH":
+                dist_to_res = abs(cur - sent_res) / cur * 100
+                if dist_to_res < 1.0:
+                    score += 4; signals.append("🎯 At Sentinel resistance $"+str(round(sent_res,4)))
+                elif dist_to_res < 2.0:
+                    score += 2; signals.append("📍 Near Sentinel resistance $"+str(round(sent_res,4)))
+            if sent_bias == "BEARISH":
+                score += 2; signals.append("🧠 Sentinel bias: BEARISH")
+            elif sent_bias == "BULLISH":
+                score -= 3
+    except Exception: pass
+
+    # ENTRY CONFIRMATION GATE: applied in main loop where direction is known.
+    vol_ok, vol_count, vol_detail = check_volume_alignment(symbol)
+    if not vol_ok and score < required_score + 4: return None
+
+    picture = get_full_picture(symbol)
+    if picture["bull_count"] >= 3: return None
+    if picture["bear_count"] < 2: return None
+
+    entry      = cur
+    sweep_data = detect_sweep_and_retest(symbol, "short")
+    mtf_levels = get_mtf_levels(symbol, cur)
+    res_levels = sorted([l for l in mtf_levels if l["type"]=="resistance"], key=lambda x: x["dist_pct"])
+    sup_levels = sorted([l for l in mtf_levels if l["type"]=="support"],    key=lambda x: x["dist_pct"])
+
+    if sweep_data and sweep_data["retest_confirmed"]:
+        sl        = sweep_data["wick_extreme"] * 1.005
+        key_tf    = sweep_data["tf"]
+        key_level = sweep_data["wick_extreme"]
+        signals.append("🎯 Liquidity sweep + retest confirmed")
+    else:
+        best_res_stop = res_levels[0]["level"] if res_levels else None
+        sl        = (best_res_stop * 1.008) if best_res_stop else min(entry + atr*2.5, res*1.005)
+        key_tf    = res_levels[0]["tf"]    if res_levels else "1H"
+        key_level = res_levels[0]["level"] if res_levels else res
+
+    risk = max(sl - entry, entry*0.005)
+    if len(sup_levels) >= 2:
+        tp1 = sup_levels[0]["level"] * 1.005
+        tp2 = sup_levels[1]["level"] * 1.005
+    elif len(sup_levels) == 1:
+        tp1 = sup_levels[0]["level"] * 1.005
+        tp2 = entry - risk * 3.0
+    else:
+        tp1 = entry - risk * 2.0
+        tp2 = entry - risk * 4.0
+
+    if tp1 >= entry: tp1 = entry - risk * 2.0
+    if tp2 >= tp1:   tp2 = tp1  - risk * 2.0
+
+    rr = abs(tp1 - entry) / risk if risk > 0 else 0
+    if rr < MIN_RISK_REWARD: return None
+
+    conf = "🟢 STRONG SHORT" if score >= 12 else ("🟡 MODERATE SHORT" if score >= 8 else "🔴 WATCH SHORT")
+    return {
+        "symbol": symbol, "name": coin_data.get("name", symbol),
+        "price": cur, "entry": entry, "tp1": tp1, "tp2": tp2, "sl": sl,
+        "rsi": rsi, "vol_ratio": vol_r, "vol_delta": vd, "vol_detail": vol_detail,
+        "signals": signals, "score": score, "confidence": conf,
+        "atr": atr, "atr_pct": round(atr/entry*100, 2),
+        "above_200": not bel200, "market_structure": mst, "divergence": div,
+        "risk_reward": round(rr, 2),
+        "market_cap": coin_data.get("market_cap", 0),
+        "volume_24h": coin_data.get("volume_24h", 0),
+        "direction": "short", "picture": picture,
+        "key_tf": key_tf, "key_level": round(key_level, 6),
+        "key_dist_pct": round(res_levels[0]["dist_pct"] if res_levels else 0, 3),
+        "key_type": "resistance",
+        "sentinel_resistance": sent_res,  # used by timing gate for accurate proximity check
+    }
+
+# ============================================================
+# DATA SOURCES
+# ============================================================
+def get_coins_cmc():
+    try:
+        r = requests.get("https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest",
+                         headers={"X-CMC_PRO_API_KEY":CMC_API_KEY},
+                         params={"limit":CMC_TOP_COINS,"sort":"market_cap","convert":"USD"}, timeout=15)
+        coins=[]
+        for c in r.json().get("data",[]):
+            q=c["quote"]["USD"]
+            if q.get("volume_24h",0)>=MIN_24H_VOLUME_USD:
+                coins.append({"symbol":c["symbol"],"name":c["name"],
+                               "volume_24h":q["volume_24h"],"change_24h":q.get("percent_change_24h",0),
+                               "market_cap":q.get("market_cap",0)})
+        logger.info("CMC: "+str(len(coins))+" coins"); return coins
+    except Exception as e: logger.error("CMC: "+str(e)); return []
+
+def get_coins_coingecko():
+    try:
+        r = requests.get("https://api.coingecko.com/api/v3/coins/markets",
+                         params={"vs_currency":"usd","order":"market_cap_desc",
+                                 "per_page":CMC_TOP_COINS,"page":1}, timeout=15)
+        coins=[]
+        for c in r.json():
+            v=c.get("total_volume",0) or 0
+            if v>=MIN_24H_VOLUME_USD:
+                coins.append({"symbol":c["symbol"].upper(),"name":c["name"],"volume_24h":v,
+                               "change_24h":c.get("price_change_percentage_24h",0) or 0,
+                               "market_cap":c.get("market_cap",0) or 0})
+        logger.info("CoinGecko: "+str(len(coins))+" coins"); return coins
+    except Exception as e: logger.error("CoinGecko: "+str(e)); return []
+
+def get_coins_binance():
+    try:
+        r = requests.get("https://api.binance.com/api/v3/ticker/24hr", timeout=15)
+        coins=[]
+        for t in r.json():
+            sym=t.get("symbol","")
+            if not sym.endswith("USDT"): continue
+            base=sym.replace("USDT",""); vol=float(t.get("quoteVolume",0))
+            if vol>=MIN_24H_VOLUME_USD:
+                coins.append({"symbol":base,"name":base,"volume_24h":vol,
+                               "change_24h":float(t.get("priceChangePercent",0)),"market_cap":0})
+        coins=sorted(coins,key=lambda x:x["volume_24h"],reverse=True)[:CMC_TOP_COINS]
+        logger.info("Binance: "+str(len(coins))+" coins"); return coins
+    except Exception as e: logger.error("Binance: "+str(e)); return []
+
+def get_coins_kraken():
+    try:
+        r=requests.get("https://api.kraken.com/0/public/Ticker",timeout=15)
+        coins=[]
+        for pair,info in r.json().get("result",{}).items():
+            if not pair.endswith("USDT") and not pair.endswith("USD"): continue
+            base=pair.replace("USDT","").replace("USD","").replace("XBT","BTC")
+            try:
+                v=float(info["v"][1]); p=float(info["c"][0]); uv=v*p
+                if uv>=MIN_24H_VOLUME_USD:
+                    coins.append({"symbol":base,"name":base,"volume_24h":uv,"change_24h":0,"market_cap":0})
+            except Exception: continue
+        coins=sorted(coins,key=lambda x:x["volume_24h"],reverse=True)[:CMC_TOP_COINS]
+        logger.info("Kraken: "+str(len(coins))+" coins"); return coins
+    except Exception as e: logger.error("Kraken: "+str(e)); return []
+
+def get_quality_coins():
+    global active_source
+    for name,fn in [("CoinMarketCap",get_coins_cmc),("CoinGecko",get_coins_coingecko),
+                    ("Binance",get_coins_binance),("Kraken",get_coins_kraken)]:
+        coins=fn()
+        if len(coins)>=10: active_source=name; return coins
+        logger.warning(name+" insufficient")
+    active_source="None"; return []
+
+# ============================================================
+# BREAKING NEWS
+# ============================================================
+NEWS_SOURCES = [
+    "https://cointelegraph.com/rss","https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "https://decrypt.co/feed","https://bitcoinmagazine.com/feed","https://www.theblock.co/rss.xml"
+]
+MARKET_MOVERS = ["trump","elon","musk","sec","federal reserve","fed ","blackrock","vanguard",
+                 "fidelity","imf","world bank","binance","coinbase","congress","senate",
+                 "white house","etf","ban","illegal","hack","exploit","bankrupt","depeg"]
+BULLISH_KEYWORDS = {"reserve asset":3,"legal tender":3,"etf approved":3,"spot etf":3,
+                    "strategic reserve":3,"buy bitcoin":2,"institutional":2,"partnership":2,
+                    "adoption":2,"listing":2,"bullish":2,"rally":1,"upgrade":1}
+BEARISH_KEYWORDS = {"ban":3,"illegal":3,"hack":3,"exploit":3,"bankrupt":3,"depeg":3,
+                    "crash":2,"dump":2,"lawsuit":2,"investigation":2,"regulation":2,
+                    "bearish":2,"scam":2,"concern":1,"risk":1,"warning":1}
+seen_headlines = set()
+
+def scan_breaking_news():
+    global seen_headlines
+    important_news = []
+    for source_url in NEWS_SOURCES:
+        try:
+            r = requests.get(source_url, timeout=8)
+            for p in r.text.split("<title>")[1:6]:
+                h = p.split("</title>")[0].strip().replace("<![CDATA[","").replace("]]>","").strip()
+                if not h or len(h)<10 or h in seen_headlines: continue
+                seen_headlines.add(h)
+                if len(seen_headlines)>500: seen_headlines=set(list(seen_headlines)[-200:])
+                hl=h.lower(); is_mm=any(m in hl for m in MARKET_MOVERS)
+                bs=sum(v for k,v in BULLISH_KEYWORDS.items() if k in hl)
+                brs=sum(v for k,v in BEARISH_KEYWORDS.items() if k in hl)
+                ns=bs-brs
+                if abs(ns)>=2 or is_mm:
+                    sent="🟢 BULLISH" if ns>0 else ("🔴 BEARISH" if ns<0 else "⚪️ NEUTRAL")
+                    imp=("very bullish" if ns>=3 else "bullish" if ns>0 else
+                         "very bearish" if ns<=-3 else "bearish" if ns<0 else "neutral")
+                    important_news.append({"headline":h[:150],"sentiment":sent,"impact":imp,
+                                           "net_score":ns,"is_market_mover":is_mm,
+                                           "source":source_url.split("/")[2]})
+        except Exception: continue
+    important_news.sort(key=lambda x:(x["is_market_mover"],abs(x["net_score"])),reverse=True)
+    return important_news[:3]
+
+def format_news_alert(item):
+    nl=chr(10); ns=item["net_score"]; is_m=item["is_market_mover"]
+    action=("Pausing new entries until market reacts." if is_m and ns<=-2 else
+            "On high alert for setups." if is_m and ns>=2 else "Being more selective.")
+    return ("🚨 <b>Breaking News</b>"+nl+nl+"📰 "+item["headline"]+nl+nl+
+            item["sentiment"]+" — "+item["impact"].upper()+nl+"📡 "+item["source"]+nl+nl+
+            "🤖 <i>"+action+"</i>")
+
+def human_quiet_message():
+    btc=get_btc_24h_change(); regime=get_sentinel_regime()
+    bstr=("+" if btc>=0 else "")+str(round(btc,2))+"%"
+    oc=len([s for s in open_signals if s["status"]=="open"])
+    bc=("BTC barely moving." if abs(btc)<1 else "BTC up "+bstr+" — good energy." if btc>3 else
+        "BTC down "+bstr+" — being careful." if btc<-3 else "BTC "+bstr+".")
+    tc=(" "+str(oc)+" trade"+("s" if oc>1 else "")+" running." if oc>0 else "")
+    return ("👀 Market quiet. "+bc+" Regime: "+regime.get("emoji","")+" "+regime.get("regime","?")+"."+tc+
+            " I'll alert you when a quality setup appears. 🎯")
+
+# ============================================================
+# SCANNER — v4.1: uses get_sentinel_regime()
+# ============================================================
+def is_already_open(symbol):
+    return any(s["symbol"]==symbol and s["status"]=="open" for s in open_signals)
+
+def scan_market():
+    regime        = get_sentinel_regime()   # NEW v4.1: single source of truth
+    intel         = get_market_intelligence()
+    quality_coins = get_quality_coins()
+    long_opps     = []; short_opps = []; now = time.time()
+    entries_this_scan = 0
+
+    now_hour   = datetime.now(timezone.utc).hour
+    best_hours = [20, 19, 16]
+    hour_boost = 2 if now_hour in best_hours else 0
+
+    def sentinel_priority(coin):
+        sym = coin["symbol"]
+        cs  = brain["coin_stats"].get(sym, {})
+        wins   = cs.get("wins", 0)
+        losses = cs.get("losses", 0)
+        total  = wins + losses
+        if total < 2: return 0.5 + hour_boost
+        return wins / total + hour_boost
+
+    quality_coins = sorted(quality_coins, key=sentinel_priority, reverse=True)
+
+    for coin in quality_coins:
+        if entries_this_scan >= MAX_TRADES_PER_SCAN: break
+        sym = coin["symbol"]
+        if sym in STABLECOINS or is_already_open(sym): continue
+        if sym in alerted_symbols and now-alerted_symbols[sym] < TRADE_DEDUP_SECONDS: continue
+        cooldown = brain["coin_stats"].get(sym,{}).get("cooldown_until",0)
+        if time.time() < cooldown: continue
+        cs    = brain["coin_stats"].get(sym, {})
+        total = cs.get("wins", 0) + cs.get("losses", 0)
+        if total >= 5:
+            win_rate = cs.get("wins", 0) / total
+            if win_rate < 0.20:
+                logger.info("Skipping "+sym+" — low win rate ("+str(round(win_rate*100))+"% from "+str(total)+" trades)")
+                continue
+        try:
+            long_r = analyze(sym, coin, regime, intel)
+            if long_r: long_opps.append(long_r); logger.info("Long: "+sym+" score="+str(long_r["score"]))
+            short_r = analyze_short(sym, coin, regime, intel)
+            if short_r: short_opps.append(short_r); logger.info("Short: "+sym+" score="+str(short_r["score"]))
+            if long_r or short_r: alerted_symbols[sym] = now
+            time.sleep(0.15)
+        except Exception as e:
+            logger.error("Analyzing "+sym+": "+str(e))
+
+    long_opps.sort(key=lambda x:x["score"], reverse=True)
+    short_opps.sort(key=lambda x:x["score"], reverse=True)
+    # Pass top 8 per direction — more variety reaches Sentinel for approval
+    # Sentinel still has final say on which ones pass its 7 checks
+    return long_opps[:8] + short_opps[:8], regime, intel
+
+# ============================================================
+# ALERT FORMATTING
+# ============================================================
+def format_alert(o, position_size=None, learned_wr=None):
+    nl        = chr(10)
+    direction = o.get("direction", "long")
+    is_short  = direction == "short"
+    dir_icon  = "🔴 SHORT" if is_short else "🟢 LONG"
+    dir_arrow = "📉" if is_short else "📈"
+    sig_text  = nl.join("  " + s for s in o["signals"])
+    now       = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    if position_size is None:
+        hour          = datetime.now(timezone.utc).hour
+        atr_pct       = o.get("atr_pct", 0) / 100
+        position_size = calc_position_size(o["score"], o["symbol"], hour, direction, atr_pct)
+    if learned_wr is None:
+        hour       = datetime.now(timezone.utc).hour
+        learned_wr = get_learned_win_rate(o["symbol"], hour, direction)
+    bal_after = round(portfolio["balance"] - position_size, 2)
+    entry = o["entry"]; tp1 = o["tp1"]; tp2 = o["tp2"]; sl = o["sl"]
+    rr    = o.get("risk_reward", 0)
+    phase_num, phase_name = get_learning_phase()
+    brain_note = ("🧠 Phase: " + phase_name + chr(10) if phase_num < 2 else
+                  "🧠 Win rate this coin (" + direction + "): " + str(round(learned_wr*100)) + "%" + chr(10))
+    return (
+        "🚨 <b>TRADE ENTERED</b>" + nl +
+        "━━━━━━━━━━━━━━━━━━━━━━" + nl +
+        dir_arrow + " <b>" + o["name"] + " (" + o["symbol"] + "/USDT)</b>" + nl +
+        dir_icon + " — " + o["confidence"] + nl + nl +
+        "━━ TRADE LEVELS ━━━━━━━" + nl +
+        "📍 Entry:          $" + str(round(entry, 6)) + nl +
+        "🎯 TP1 (50% exit): $" + str(round(tp1, 6)) + nl +
+        "🎯 TP2 (trail):    $" + str(round(tp2, 6)) + nl +
+        "🛑 Stop:           $" + str(round(sl, 6)) + nl +
+        "📏 Risk/Reward:    1:" + str(rr) + nl +
+        "━━━━━━━━━━━━━━━━━━━━━━" + nl + nl +
+        "📊 <b>Signals:</b>" + nl + sig_text + nl + nl +
+        dir_arrow + " RSI: " + str(round(o["rsi"],1)) +
+        "  |  Vol: " + str(round(o["vol_ratio"],1)) + "x" +
+        "  |  Δ: " + str(o.get("vol_delta","?")) + nl +
+        "🌍 Structure: " + o.get("market_structure","?").capitalize() + nl +
+        brain_note +
+        "💵 Position: $" + str(position_size) + nl +
+        "🏦 Balance:  $" + str(bal_after) + nl +
+        "⏰ " + now + nl +
+        "📡 <i>Tracking with ATR trailing stop...</i>"
+    )
+
+def format_alert_info(o, learned_wr, reason):
+    sig_text = chr(10).join("  " + s for s in o["signals"])
+    now      = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    entry = o["entry"]; rr = o.get("risk_reward", 0)
+    return (
+        "👀 <b>SIGNAL SPOTTED — NOT ENTERED</b>" + chr(10) +
+        "⚠️ <i>Reason: " + reason + "</i>" + chr(10) + chr(10) +
+        "<b>" + o["name"] + " (" + o["symbol"] + "/USDT) — " + o.get("direction","long").upper() + "</b>" + chr(10) +
+        "📍 Entry: $" + str(round(entry, 6)) + chr(10) +
+        "🎯 TP1:   $" + str(round(o["tp1"], 6)) + chr(10) +
+        "📏 R:R    1:" + str(rr) + chr(10) + chr(10) +
+        "📊 <b>Signals:</b>" + chr(10) + sig_text + chr(10) + chr(10) +
+        "RSI: " + str(round(o["rsi"],1)) + "  |  Score: " + str(o["score"]) + chr(10) +
+        "🧠 Learned WR: " + str(round(learned_wr*100)) + "%" + chr(10) + "⏰ " + now
+    )
+
+# ============================================================
+# DEEP ANALYSIS
+# ============================================================
+def deep_analyse(symbol):
+    raw = get_klines(symbol, "1h", 210)
+    if not raw or len(raw) < 25:
+        return "❌ <b>" + symbol + "/USDT</b> not found."
+    closes  = [float(c[4]) for c in raw]; highs = [float(c[2]) for c in raw]
+    lows    = [float(c[3]) for c in raw]; volumes = [float(c[5]) for c in raw]
+    cur     = closes[-1]
+    rsi     = calc_rsi_wilder(closes); macd = calc_macd(closes)
+    atr     = calc_atr(highs, lows, closes)
+    bbu, bbm, bbl = calc_bollinger_bands(closes)
+    vd      = calc_volume_delta(raw)
+    mst     = detect_market_structure(highs, lows)
+    res, sup= find_key_levels(highs, lows, closes)
+    ema9    = calc_ema(closes, 9); ema21 = calc_ema(closes, 21); ema50 = calc_ema(closes, 50)
+    ema200  = calc_ema(closes, 200) if len(closes) >= 200 else None
+    avg_vol = sum(volumes[-21:-1]) / 20 if len(volumes) > 20 else 1
+    vol_r   = volumes[-1] / avg_vol if avg_vol > 0 else 1.0
+    ab200   = ema200 is not None and cur > ema200[-1]
+    ch24    = ((closes[-1]-closes[-24])/closes[-24]*100) if len(closes)>=24 else 0
+    rsi_s   = "🟢 Oversold" if rsi<35 else ("🔴 Overbought" if rsi>70 else "⚪️ Neutral")
+    vd_s    = "💚 Buyers" if vd>0.6 else ("🔴 Sellers" if vd<0.4 else "⚪️ Balanced")
+    macd_s  = "N/A"
+    if macd[0] is not None:
+        ml,slv,hist = macd[0],macd[1],macd[2]
+        macd_s = ("+" if ml>=0 else "")+str(round(ml,4))+" sig:"+str(round(slv,4))+(" 🟢" if ml>slv else " 🔴")
+    entry = cur; sl2 = entry-atr*ATR_SL_MULTIPLIER; risk = entry-sl2
+    tp1   = entry+risk*2.0; tp2 = entry+risk*4.0
+    rr    = round((tp1-entry)/risk,2) if risk>0 else 0
+    cs    = brain["coin_stats"].get(symbol,{})
+    cw=cs.get("wins",0); cl=cs.get("losses",0); ct=cw+cl
+    brain_s = (str(cw)+"W/"+str(cl)+"L | Long:"+str(cs.get("long_wins",0))+"W/"+str(cs.get("long_losses",0))+"L Short:"+str(cs.get("short_wins",0))+"W/"+str(cs.get("short_losses",0))+"L") if ct>0 else "No history"
+    # Sentinel knowledge
+    sent_str = ""
+    try:
+        sk = requests.get(SENTINEL_URL.replace("/analyse","/knowledge/"+symbol), timeout=3)
+        if sk.status_code == 200:
+            sd = sk.json()
+            sent_str = (chr(10)+"<b>🧠 Sentinel knows:</b>"+chr(10)+
+                        "Bias: "+sd.get("overall_bias","?")+" | Phase: "+sd.get("phase","?")+chr(10)+
+                        "Support: $"+str(sd.get("support",0))+" | Resistance: $"+str(sd.get("resistance",0)))
+    except Exception: pass
+    now = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    return ("📊 <b>" + symbol + "/USDT — Deep Analysis v4.1</b>" + chr(10) + "⏰ " + now + chr(10) + chr(10) +
+            "💰 Price: $" + str(round(cur,6)) + chr(10) +
+            "📈 24h: " + (("+" if ch24>=0 else "")+str(round(ch24,2))) + "%" + chr(10) +
+            "🌍 200 EMA: " + ("✅ Above" if ab200 else "❌ Below") + chr(10) + chr(10) +
+            "<b>Key Levels:</b>" + chr(10) +
+            "🔴 Resistance: $" + str(round(res,6)) + chr(10) +
+            "🟢 Support:    $" + str(round(sup,6)) + chr(10) + chr(10) +
+            "<b>Indicators:</b>" + chr(10) +
+            "RSI: " + str(rsi) + " — " + rsi_s + chr(10) +
+            "MACD: " + macd_s + chr(10) +
+            "ATR: $" + str(round(atr,6)) + " (" + str(round(atr/cur*100,2)) + "%)" + chr(10) +
+            "Vol: " + str(round(vol_r,1)) + "x | Δ: " + str(vd) + " — " + vd_s + chr(10) + chr(10) +
+            "<b>ATR Levels:</b>" + chr(10) +
+            "📍 Entry: $"+str(round(entry,6))+chr(10)+
+            "🎯 TP1:   $"+str(round(tp1,6))+chr(10)+
+            "🎯 TP2:   $"+str(round(tp2,6))+chr(10)+
+            "🛑 Stop:  $"+str(round(sl2,6))+chr(10)+
+            "📏 R:R:   1:"+str(rr)+chr(10)+chr(10)+
+            "<b>Bot1 history:</b> " + brain_s +
+            sent_str + chr(10) + chr(10) +
+            "⚠️ <i>Analysis only. Always do your own research.</i>")
+
+# ============================================================
+# PORTFOLIO HELPERS
+# ============================================================
+def build_open_trades_list():
+    ot = [s for s in open_signals if s["status"]=="open"]
+    if not ot: return "No open trades right now."
+    longs  = [s for s in ot if s.get("direction","long")=="long"]
+    shorts = [s for s in ot if s.get("direction","long")=="short"]
+    lines  = "<b>Open Trades:</b>\n"
+    regime = get_sentinel_regime()
+    cur_max_l = regime.get("max_longs",  BULL_MAX_LONGS)
+    cur_max_s = regime.get("max_shorts", BULL_MAX_SHORTS)
+    for label, trades, cap, is_long in [("📈 Longs",longs,cur_max_l,True),
+                                         ("📉 Shorts",shorts,cur_max_s,False)]:
+        if not trades: continue
+        lines += label + " (" + str(len(trades)) + "/" + str(cap) + "):\n"
+        for s in trades:
+            price = get_current_price(s["symbol"])
+            tp1h  = "✅TP1" if s.get("tp1_hit") else ""
+            if price:
+                pct  = round(((price-s["entry"])/s["entry"])*100 if is_long
+                             else ((s["entry"]-price)/s["entry"])*100, 2)
+                icon = "📈" if pct>=0 else "📉"
+                lines += (icon+" "+s["symbol"]+" $"+str(s.get("position_size","?"))+
+                          " | "+("+$" if pct>=0 else "")+str(pct)+"% "+tp1h+"\n")
+            else:
+                lines += "• "+s["symbol"]+" "+tp1h+"\n"
+    return lines
+
+def build_weekly_summary():
+    summary = "📅 <b>This Week:</b>\n"; today = datetime.now(timezone.utc); hd = False
+    for i in range(6,-1,-1):
+        day=today-timedelta(days=i+1); key=day.strftime("%Y-%m-%d"); label=day.strftime("%a %d %b")
+        if key in daily_history:
+            d=daily_history[key]; total=d["wins"]+d["losses"]
+            if total>0:
+                rate=round((d["wins"]/total)*100)
+                emoji="🔥" if rate>=70 else ("⚠️" if rate>=50 else "❌")
+                wpnl=round(sum(s.get("pnl",0) for s in d["signals"]),2)
+                summary+=(emoji+" "+label+" — "+str(rate)+"% ("+str(d["wins"])+"W/"+str(d["losses"])+"L / "+
+                          ("+$" if wpnl>=0 else "-$")+str(abs(wpnl))+")\n"); hd=True
+    if not hd: summary += "No history yet — building data…\n"
+    return summary
+
+def build_learn_report():
+    try:
+        total   = brain.get("total_closed",0)
+        regime  = get_market_regime(); btc = get_btc_24h_change()
+        phase_num, phase_name = get_learning_phase()
+        long_wr, short_wr, preferred = get_direction_bias()
+        if total == 0:
+            return ("🧠 <b>Bot Brain v4.1</b>\n\nNo closed trades yet.\n"
+                    "Phase: " + phase_name + "\n\n🌍 Regime: " + regime)
+        aw=sum(cs.get("wins",0) for cs in brain["coin_stats"].values())
+        al=sum(cs.get("losses",0) for cs in brain["coin_stats"].values())
+        owr=round((aw/max(aw+al,1))*100)
+        ranked=sorted([(sym,cs.get("wins",0),cs.get("losses",0),
+                        round((cs.get("wins",0)/max(cs.get("wins",0)+cs.get("losses",0),1))*100),
+                        cs.get("total_pnl",0))
+                       for sym,cs in brain["coin_stats"].items()
+                       if cs.get("wins",0)+cs.get("losses",0)>=2],
+                      key=lambda x:x[3],reverse=True)
+        streak = brain.get("streak",0)
+        streak_s = ("🔥 +" + str(streak) + " win streak" if streak >= 3 else
+                    "❄️ " + str(abs(streak)) + " loss streak" if streak <= -3 else "➡️ Neutral")
+        msg = ("🧠 <b>Bot Brain v4.1</b>\n\n"
+               "📊 Total closed: " + str(total) + "\n"
+               "🏆 Overall WR:   " + str(owr) + "%\n"
+               "📈 Long WR:      " + str(round(long_wr*100)) + "% (" + str(brain["long_closed"]) + " trades)\n"
+               "📉 Short WR:     " + str(round(short_wr*100)) + "% (" + str(brain["short_closed"]) + " trades)\n"
+               "🎯 Preferred:    " + preferred.upper() + "\n"
+               "🔥 Streak:       " + streak_s + "\n"
+               "🔒 Phase:        " + phase_name + "\n\n"
+               "🌍 Regime: " + regime + "\n"
+               "₿ BTC 24h: " + ("+" if btc>=0 else "")+str(round(btc,2))+"%\n\n")
+        if ranked:
+            msg += "<b>🏅 Best Coins:</b>\n"
+            for sym,w,l,wr,pnl in ranked[:5]:
+                msg += "• "+sym+": "+str(wr)+"% ("+str(w)+"W/"+str(l)+"L)\n"
+        return msg
+    except Exception as e:
+        logger.error("build_learn_report: "+str(e)); return "🧠 Loading... try again."
+
+# ============================================================
+# COMMANDS — identical to v4.0, regime display updated
+# ============================================================
+def handle_commands():
+    global last_update_id, bot_running
+    data = get_updates(offset=last_update_id)
+    for update in data.get("result",[]):
+        last_update_id = update["update_id"]+1
+
+        # Handle button callbacks (e.g. Resume Notifications button)
+        callback_query = update.get("callback_query",{})
+        callback_data  = callback_query.get("data","")
+        callback_id    = callback_query.get("id","")
+        if callback_query:
+            chat_id = callback_query.get("message",{}).get("chat",{}).get("id")
+            if not chat_id: continue
+            chat_ids.add(chat_id); save_json_set("chat_ids.json", chat_ids)
+            if callback_data == "resume_alerts":
+                paused_ids.discard(chat_id)
+                save_json_set("paused_ids.json", paused_ids)
+                try:
+                    requests.post("https://api.telegram.org/bot"+TELEGRAM_TOKEN+"/answerCallbackQuery",
+                                  json={"callback_query_id":callback_id},timeout=5)
+                except: pass
+                send_message(chat_id, "🔔 <b>Notifications resumed</b>"+chr(10)+"All alerts back on. 🎯")
+            continue
+
+        msg      = update.get("message",{})
+        chat_id  = msg.get("chat",{}).get("id")
+        raw_text = msg.get("text","").strip()
+        text     = raw_text.lower()
+        if not chat_id: continue
+        chat_ids.add(chat_id); save_json_set("chat_ids.json", chat_ids)
+
+        if text == "flash stop":
+            bot_running = False; save_bot_running(False)
+            send_message(chat_id, "🛑 <b>CryptoRadar STOPPED.</b>\n\nType flash start to restart.")
+
+        elif text == "flash start":
+            bot_running = True; save_bot_running(True)
+            paused_ids.discard(chat_id); save_json_set("paused_ids.json", paused_ids)
+            send_message(chat_id, "✅ <b>CryptoRadar v4.1 STARTED.</b>\n\nScanning every 15 minutes. 🎯")
+
+        elif text == "/start":
+            bot_running = True; save_bot_running(True)
+            paused_ids.discard(chat_id); save_json_set("paused_ids.json", paused_ids)
+            phase_num, phase_name = get_learning_phase()
+            send_message(chat_id,
+                "🚀 <b>CryptoRadar Bot v4.1 — Dual Brain</b>\n\n"
+                "🤝 Powered by CryptoRadar + Sentinel\n\n"
+                "<b>Trading:</b>\n"
+                "/scan — Manual market scan\n"
+                "/trades — All open trades + details\n"
+                "/copytrade — Clean copy-paste levels\n"
+                "/portfolio — Balance, P&L, heat\n"
+                "/risk — Risk dashboard\n\n"
+                "<b>Analysis:</b>\n"
+                "/analyse BTC — Deep coin analysis\n"
+                "/intelligence — Binance + Fear & Greed\n"
+                "/brain — Bot1 learning stats\n"
+                "/learn — Full brain report\n"
+                "/history — Weekly win rate\n"
+                "/key — Last 10 trade diagnoses\n\n"
+                "<b>System:</b>\n"
+                "/status — Bot status\n"
+                "/pause /resume\n"
+                "flash stop / flash start\n\n"
+                "Phase: " + phase_name + " (" + str(brain["total_closed"]) + " trades)\n"
+                "Sentinel: " + SENTINEL_URL.split("/")[2]
+            )
+
+        elif text == "/pause":
+            paused_ids.add(chat_id); save_json_set("paused_ids.json", paused_ids)
+            try:
+                requests.post(
+                    "https://api.telegram.org/bot"+TELEGRAM_TOKEN+"/sendMessage",
+                    json={"chat_id":chat_id,
+                          "text":"🔕 <b>Notifications paused</b>"+chr(10)+chr(10)+
+                                 "CryptoRadar is still running fully:"+chr(10)+
+                                 "✅ Scanning market every 15min"+chr(10)+
+                                 "✅ Monitoring all open trades"+chr(10)+
+                                 "✅ Asking Sentinel for approvals"+chr(10)+
+                                 "✅ Recording wins and losses"+chr(10)+chr(10)+
+                                 "Only Telegram alerts are off."+chr(10)+
+                                 "Tap below when you want alerts back.",
+                          "parse_mode":"HTML",
+                          "reply_markup":{"inline_keyboard":[[
+                              {"text":"🔔 Resume Notifications","callback_data":"resume_alerts"}
+                          ]]}},timeout=10)
+            except Exception as e:
+                logger.error("Pause msg: "+str(e))
+
+        elif text == "/resume":
+            paused_ids.discard(chat_id); save_json_set("paused_ids.json", paused_ids)
+            send_message(chat_id, "🔔 <b>Notifications resumed</b>"+chr(10)+"All alerts back on. 🎯")
+
+        elif text == "/scan":
+            if not bot_running:
+                send_message(chat_id, "🛑 Bot stopped. Type flash start to turn on.")
+            else:
+                send_message(chat_id, "🔍 Full scan running — 60-90 seconds...")
+                try:
+                    opps, regime, intel = scan_market()
+                    now_hour = datetime.now(timezone.utc).hour
+                    if opps:
+                        entered = 0
+                        for opp in opps:
+                            if entered >= MAX_TRADES_PER_SCAN: break
+                            direction = opp.get("direction","long")
+                            ok, reason = should_enter_trade(opp["symbol"], now_hour, opp["score"], direction, regime, intel)
+                            if ok:
+                                send_message(chat_id, "🔍 Signal: " + opp["symbol"] + " " + direction.upper() + chr(10) + "Asking Sentinel...")
+                                sentinel_ok, sentinel_reason = check_sentinel_approval(opp, direction)
+                                if sentinel_ok:
+                                    atr_pct    = opp.get("atr_pct",0)/100
+                                    pos_size   = calc_position_size(opp["score"],opp["symbol"],now_hour,direction,atr_pct)
+                                    learned_wr = get_learned_win_rate(opp["symbol"],now_hour,direction)
+                                    send_message(chat_id, format_alert(opp, pos_size, learned_wr))
+                                    save_signal(opp, pos_size, direction)
+                                    entered += 1
+                                else:
+                                    send_message(chat_id, "🚫 <b>BLOCKED by Sentinel</b>" + chr(10) + opp["symbol"] + " — " + sentinel_reason)
+                            else:
+                                learned_wr = get_learned_win_rate(opp["symbol"],now_hour,direction)
+                                send_message(chat_id, format_alert_info(opp, learned_wr, reason))
+                    else:
+                        send_message(chat_id, "📭 No high-quality setups right now. Standards are high. 🎯")
+                except Exception as e:
+                    logger.error("Scan command error: " + str(e))
+                    send_message(chat_id, "⚠️ Scan error: " + str(e)[:100])
+
+        elif text.startswith("/analyse"):
+            parts = raw_text.split()
+            if len(parts) < 2: send_message(chat_id, "Usage: /analyse BTC")
+            else:
+                sym = parts[1].upper()
+                send_message(chat_id, "🔍 Analysing "+sym+"...")
+                send_message(chat_id, deep_analyse(sym))
+
+        elif text == "/portfolio":
+            lc       = len([s for s in open_signals if s["status"]=="open" and s.get("direction","long")=="long"])
+            sc       = len([s for s in open_signals if s["status"]=="open" and s.get("direction","long")=="short"])
+            invested = sum(s.get("position_size",0) for s in open_signals if s["status"]=="open")
+            total_val= round(portfolio["balance"]+invested, 2)
+            growth   = round(((total_val-STARTING_BALANCE)/STARTING_BALANCE)*100, 2)
+            regime   = get_sentinel_regime()
+            max_l    = regime.get("max_longs",  BULL_MAX_LONGS)
+            max_s    = regime.get("max_shorts", BULL_MAX_SHORTS)
+            send_message(chat_id,
+                "💼 <b>Portfolio</b>\n\n"
+                "🏦 Cash:        $"+str(portfolio["balance"])+"\n"
+                "📈 In Trades:   $"+str(round(invested,2))+"\n"
+                "💰 Total Value: $"+str(total_val)+"\n"
+                "📊 Total P&L:   "+("+" if portfolio["total_pnl"]>=0 else "")+str(portfolio["total_pnl"])+"$\n"
+                "🚀 Growth:      "+("+" if growth>=0 else "")+str(growth)+"% from $"+str(int(STARTING_BALANCE))+"\n"
+                "🌍 Regime:      "+regime.get("emoji","")+" "+regime.get("regime","?")+" (via Sentinel)\n"
+                "📡 Longs:       "+str(lc)+"/"+str(max_l)+" | Shorts: "+str(sc)+"/"+str(max_s)+"\n\n"
+                + build_open_trades_list()
+            )
+
+        elif text == "/learn": send_message(chat_id, build_learn_report())
+        elif text == "/history": send_message(chat_id, build_weekly_summary())
+
+        elif text == "/status":
+            is_paused = chat_id in paused_ids
+            oc        = len([s for s in open_signals if s["status"]=="open"])
+            status    = "🛑 STOPPED" if not bot_running else ("⏸️ PAUSED" if is_paused else "✅ ACTIVE")
+            phase_num, phase_name = get_learning_phase()
+            regime    = get_sentinel_regime()
+            send_message(chat_id,
+                status+"\n\n<b>CryptoRadar v4.1 Status</b>\n\n"
+                "🔄 Scan every:  "+str(SCAN_INTERVAL_SECONDS//60)+" min\n"
+                "📊 Coins:       top "+str(CMC_TOP_COINS)+"\n"
+                "📡 Source:      "+active_source+"\n"
+                "📈 Open trades: "+str(oc)+"\n"
+                "🌍 Regime:      "+regime.get("emoji","")+" "+regime.get("regime","?")+" (Sentinel)\n"
+                "🧠 Phase:       "+phase_name+" ("+str(brain["total_closed"])+" trades)\n"
+                "🏦 Balance:     $"+str(portfolio["balance"])+"\n"
+                "🔔 Alerts:      "+("STOPPED" if not bot_running else ("PAUSED" if is_paused else "ACTIVE"))
+            )
+
+        elif text == "/trades":
+            nl2 = chr(10)
+            open_trades = [s for s in open_signals if s["status"] == "open"]
+            if not open_trades:
+                send_message(chat_id, "📭 No open trades right now." + nl2 + nl2 +
+                             "The bot will alert you the moment it enters one.")
+            else:
+                longs  = [s for s in open_trades if s.get("direction","long") == "long"]
+                shorts = [s for s in open_trades if s.get("direction","long") == "short"]
+                msg    = "📊 <b>Active Trades (" + str(len(open_trades)) + " open)</b>" + nl2
+                msg   += "━━━━━━━━━━━━━━━━━━━━━━" + nl2 + nl2
+                for label, trades, is_long in [("📈 LONGS", longs, True), ("📉 SHORTS", shorts, False)]:
+                    if not trades: continue
+                    msg += "<b>" + label + " (" + str(len(trades)) + ")</b>" + nl2
+                    for s in trades:
+                        price     = get_current_price(s["symbol"])
+                        tp1_hit   = s.get("tp1_hit", False)
+                        remaining = s.get("remaining_size", s.get("position_size",0))
+                        pct = 0; cur_str = "fetching..."
+                        if price:
+                            pct     = round(((price-s["entry"])/s["entry"])*100 if is_long else ((s["entry"]-price)/s["entry"])*100, 2)
+                            cur_str = "$" + str(round(price, 6))
+                        try:
+                            entry_dt  = datetime.fromisoformat(s["timestamp"])
+                            hours_ago = round((datetime.now(timezone.utc) - entry_dt).total_seconds() / 3600, 1)
+                            time_str  = str(hours_ago) + "h ago"
+                        except: time_str = "unknown"
+                        status = "✅ TP1 hit — trailing to TP2 🔒" if tp1_hit else "⏳ Monitoring"
+                        pnl_icon = "📈" if pct >= 0 else "📉"
+                        msg += ("━━━━━━━━━━━━━━━━━━━━" + nl2 +
+                                "<b>" + s["symbol"] + "/USDT</b> — " + time_str + nl2 +
+                                "📍 Entry: $" + str(round(s["entry"],6)) + nl2 +
+                                "🎯 TP1:   $" + str(round(s["tp1"],6)) + nl2 +
+                                "🎯 TP2:   $" + str(round(s["tp2"],6)) + nl2 +
+                                "🛑 Stop:  $" + str(round(s["sl"],6)) + nl2 +
+                                "💰 Now:   " + cur_str + nl2 +
+                                pnl_icon + " P&L:  " + ("+" if pct>=0 else "") + str(pct) + "%" + nl2 +
+                                "💵 Size:  $" + str(s.get("position_size",0)) + " ($" + str(round(remaining,2)) + " remaining)" + nl2 +
+                                "📊 " + status + nl2 + nl2)
+                msg += "⏰ " + datetime.now(timezone.utc).strftime("%H:%M UTC")
+                send_message(chat_id, msg)
+
+        elif text == "/copytrade":
+            nl2 = chr(10)
+            open_trades = [s for s in open_signals if s["status"] == "open"]
+            if not open_trades:
+                send_message(chat_id, "📭 No open trades right now.")
+            else:
+                msg = "📋 <b>Copy Trade Levels</b>" + nl2 + "All currently open positions:" + nl2 + nl2
+                for s in open_trades:
+                    price      = get_current_price(s["symbol"])
+                    cur_p      = "$" + str(round(price, 6)) if price else "fetching..."
+                    tp1_status = "✅ TP1 HIT" if s.get("tp1_hit") else "⏳ Waiting"
+                    dir_icon   = "📈 LONG" if s.get("direction","long")=="long" else "📉 SHORT"
+                    pnl_now    = ""
+                    if price:
+                        if s.get("direction","long") == "long":
+                            pct = round(((price-s["entry"])/s["entry"])*100, 2)
+                        else:
+                            pct = round(((s["entry"]-price)/s["entry"])*100, 2)
+                        pnl_now = ("+" if pct>=0 else "") + str(pct) + "%"
+                    msg += ("━━━━━━━━━━━━━━━━━━━━" + nl2 +
+                            dir_icon + " <b>" + s["symbol"] + "/USDT</b>" + nl2 +
+                            "📍 Entry: $" + str(round(s["entry"],6)) + nl2 +
+                            "🎯 TP1:   $" + str(round(s["tp1"],6)) + nl2 +
+                            "🎯 TP2:   $" + str(round(s["tp2"],6)) + nl2 +
+                            "🛑 Stop:  $" + str(round(s["sl"],6)) + nl2 +
+                            "💰 Now:   " + cur_p + " (" + pnl_now + ")" + nl2 +
+                            "📊 " + tp1_status + nl2 + nl2)
+                send_message(chat_id, msg)
+
+        elif text == "/intelligence":
+            send_message(chat_id, "🔮 Fetching market intelligence...")
+            try:
+                intel  = get_market_intelligence()
+                regime = get_sentinel_regime()
+                session, _, session_note = get_trading_session()
+                nl2 = chr(10)
+                msg_out = ("🔮 <b>Market Intelligence v4.1</b>"+nl2+
+                    "━━━━━━━━━━━━━━━━━━━━━━"+nl2+nl2+
+                    "<b>🌍 Regime (Sentinel):</b>"+nl2+
+                    regime.get("emoji","")+" "+regime.get("regime","?")+" — "+regime.get("note","")+nl2+nl2+
+                    "<b>📡 Binance Futures:</b>"+nl2+
+                    "💰 Funding:    "+intel.get("fr","N/A")+nl2+
+                    "⚖️ L/S Ratio:  "+intel.get("ls_ratio","N/A")+nl2+
+                    "🐋 Top Traders:"+intel.get("top_trader","N/A")+nl2+
+                    "📊 OI:         "+intel.get("oi","N/A")+nl2+nl2+
+                    "<b>😱 Fear & Greed:</b>"+nl2+intel.get("fear_greed","N/A")+nl2+nl2+
+                    "<b>⏰ Session:</b>"+nl2+session_note+nl2+nl2)
+                if intel.get("summary"):
+                    msg_out += "<b>⚠️ Active signals:</b>"+nl2+intel["summary"]+nl2+nl2
+                msg_out += "<b>🎯 Decision:</b>"+nl2
+                if intel.get("btc_squeeze"):
+                    msg_out += "🚫 ALL trades blocked — BTC squeeze zone"+nl2
+                elif intel.get("block_long") and intel.get("block_short"):
+                    msg_out += "🚫 ALL trades blocked"+nl2
+                elif intel.get("block_long"):
+                    msg_out += "🚫 LONGS blocked | ✅ SHORTS allowed"+nl2
+                elif intel.get("block_short"):
+                    msg_out += "🚫 SHORTS blocked | ✅ LONGS allowed"+nl2
+                else:
+                    msg_out += "✅ Both LONGS and SHORTS allowed"+nl2
+                msg_out += nl2+"⏰ "+datetime.now(timezone.utc).strftime("%H:%M UTC")
+                send_message(chat_id, msg_out)
+            except Exception as e:
+                send_message(chat_id, "⚠️ Intelligence error: "+str(e)[:100])
+
+        elif text == "/risk":
+            nl2     = chr(10)
+            regime  = get_sentinel_regime()
+            intel_r = get_market_intelligence()
+            invested  = sum(s.get("position_size",0) for s in open_signals if s["status"]=="open")
+            total_val = round(portfolio["balance"] + invested, 2)
+            heat_pct  = round(invested / total_val * 100, 1) if total_val > 0 else 0
+            today     = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            dd_str    = "N/A"
+            if daily_loss_start.get("date") == today and daily_loss_start.get("start_value",0) > 0:
+                dd_pct = round((daily_loss_start["start_value"] - total_val) / daily_loss_start["start_value"] * 100, 2)
+                dd_str = ("+" if dd_pct<=0 else "-")+str(abs(dd_pct))+"% (limit "+str(int(DAILY_DRAWDOWN_LIMIT*100))+"%)"
+            session, _, session_note = get_trading_session()
+            cb_str = ("🔴 ACTIVE " + str(int((circuit_breaker_until-time.time())/60)) + "min"
+                      if time.time()<circuit_breaker_until else "✅ OK (streak: "+str(brain.get("streak",0))+")")
+            send_message(chat_id,
+                "🛡️ <b>Risk Dashboard</b>" + nl2 + nl2 +
+                "<b>Circuit Breaker:</b>" + nl2 + cb_str + nl2 + nl2 +
+                "<b>Portfolio Heat:</b>" + nl2 +
+                str(heat_pct) + "% in trades (cap: " + str(int(PORTFOLIO_HEAT_CAP*100)) + "%) " +
+                ("🔴 AT CAP" if heat_pct >= PORTFOLIO_HEAT_CAP*100 else "✅ OK") + nl2 + nl2 +
+                "<b>Daily Drawdown:</b>" + nl2 + dd_str + nl2 + nl2 +
+                "<b>Trading Session:</b>" + nl2 + session_note + nl2 + nl2 +
+                "<b>Regime (Sentinel):</b>" + nl2 +
+                regime.get("emoji","") + " " + regime.get("regime","?") + " — " + regime.get("note","") + nl2 + nl2 +
+                "<b>Market Intelligence:</b>" + nl2 +
+                "Funding:     " + intel_r.get("fr","N/A") + nl2 +
+                "L/S Ratio:   " + intel_r.get("ls_ratio","N/A") + nl2 +
+                "Top Traders: " + intel_r.get("top_trader","N/A") + nl2 +
+                "Fear & Greed:" + intel_r.get("fear_greed","N/A") + nl2 + nl2 +
+                ("⚠️ " + intel_r.get("summary","") if intel_r.get("summary") else "✅ No active blocks"))
+
+        elif text == "/brain":
+            nl2   = chr(10)
+            total = brain.get("total_closed",0)
+            phase_num, phase_name = get_learning_phase()
+            long_wr, short_wr, preferred = get_direction_bias()
+            aw = sum(cs.get("wins",0)   for cs in brain["coin_stats"].values())
+            al = sum(cs.get("losses",0) for cs in brain["coin_stats"].values())
+            owr= round((aw/max(aw+al,1))*100)
+            streak = brain.get("streak",0)
+            streak_s = ("🔥 +" + str(streak) + " win streak" if streak >= 3 else
+                        "❄️ " + str(abs(streak)) + " loss streak" if streak <= -3 else "➡️ Neutral")
+            # Best performing coins
+            ranked = sorted([(sym, cs.get("wins",0), cs.get("losses",0),
+                              round((cs.get("wins",0)/max(cs.get("wins",0)+cs.get("losses",0),1))*100),
+                              cs.get("total_pnl",0))
+                             for sym,cs in brain["coin_stats"].items()
+                             if cs.get("wins",0)+cs.get("losses",0)>=2],
+                            key=lambda x:x[3], reverse=True)
+            best_str = nl2.join("  🏆 "+s[0]+": "+str(s[3])+"% ("+str(s[1])+"W/"+str(s[2])+"L)" for s in ranked[:5]) if ranked else "  Still learning..."
+            worst_str = nl2.join("  ⚠️ "+s[0]+": "+str(s[3])+"% ("+str(s[1])+"W/"+str(s[2])+"L)" for s in reversed(ranked[-3:])) if len(ranked)>=3 else "  None yet"
+            # Best hours
+            best_h = sorted([(int(h), hs.get("wins",0), hs.get("losses",0),
+                              round((hs.get("wins",0)/max(hs.get("wins",0)+hs.get("losses",0),1))*100))
+                             for h,hs in brain.get("hour_stats",{}).items()
+                             if hs.get("wins",0)+hs.get("losses",0)>=3],
+                            key=lambda x:x[3], reverse=True)
+            hour_str = nl2.join("  ⏰ "+str(h[0])+":00 UTC — "+str(h[3])+"% ("+str(h[1])+"W/"+str(h[2])+"L)" for h in best_h[:3]) if best_h else "  Not enough data yet"
+            # ── DIRECTIONAL ACCURACY ─────────────────────────────────────────
+            # Uses peak_pnl_pct already stored on every closed trade.
+            # Separates ENTRY quality from OUTCOME noise.
+            # A trade that went +1.5% then reversed to stop is NOT a bad entry.
+            closed_trades = [s for s in open_signals
+                            if s.get("status","") not in ["open","limit"]
+                            and s.get("peak_pnl_pct") is not None]
+            dir_total = len(closed_trades)
+            if dir_total > 0:
+                soft_wins   = sum(1 for s in closed_trades if s.get("peak_pnl_pct",0) >= 1.0)
+                strong_wins = sum(1 for s in closed_trades if s.get("peak_pnl_pct",0) >= 2.0)
+                true_bad    = sum(1 for s in closed_trades if s.get("peak_pnl_pct",0) < 0.2)
+                dir_acc     = round(soft_wins   / dir_total * 100)
+                strong_pct  = round(strong_wins / dir_total * 100)
+                bad_pct     = round(true_bad    / dir_total * 100)
+                dir_str = (
+                    "  📈 +1% reached: " + str(dir_acc)   + "% (" + str(soft_wins)   + "/" + str(dir_total) + " trades)" + nl2 +
+                    "  🚀 +2% reached: " + str(strong_pct) + "% (" + str(strong_wins) + "/" + str(dir_total) + " trades)" + nl2 +
+                    "  ❌ Never positive: " + str(bad_pct) + "% (" + str(true_bad)    + "/" + str(dir_total) + " trades)"
+                )
+            else:
+                dir_str = "  Not enough closed trades yet"
+            # ────────────────────────────────────────────────────────────────
+
+            send_message(chat_id,
+                "🧠 <b>Bot1 Brain Report</b>" + nl2 + nl2 +
+                "📊 Total closed: " + str(total) + nl2 +
+                "🏆 Overall WR:   " + str(owr) + "% (" + str(aw) + "W/" + str(al) + "L)" + nl2 +
+                "📈 Long WR:      " + str(round(long_wr*100)) + "% (" + str(brain["long_closed"]) + " trades)" + nl2 +
+                "📉 Short WR:     " + str(round(short_wr*100)) + "% (" + str(brain["short_closed"]) + " trades)" + nl2 +
+                "🎯 Preferred:    " + preferred.upper() + nl2 +
+                "🔥 Streak:       " + streak_s + nl2 +
+                "🔒 Phase:        " + phase_name + nl2 + nl2 +
+                "<b>🎯 Directional Accuracy (entry quality):</b>" + nl2 +
+                dir_str + nl2 + nl2 +
+                "<b>🏅 Best Coins:</b>" + nl2 + best_str + nl2 + nl2 +
+                "<b>⚠️ Weak Coins:</b>" + nl2 + worst_str + nl2 + nl2 +
+                "<b>⏰ Best Hours (UTC):</b>" + nl2 + hour_str + nl2 + nl2 +
+                "⏰ " + datetime.now(timezone.utc).strftime("%H:%M UTC"))
+
+        elif text == "/key":
+            nl2 = chr(10)
+            closed = [s for s in open_signals if s["status"] != "open"]
+            closed = sorted(closed, key=lambda x: x.get("close_time",""), reverse=True)[:10]
+            if not closed:
+                send_message(chat_id, "📋 No closed trades yet.")
+            else:
+                msg = "🔑 <b>Key Trade Analysis (last 10)</b>" + nl2 + nl2
+                for s in closed:
+                    result    = s.get("status","?")
+                    win       = "WIN" in result
+                    icon      = "✅" if win else "❌"
+                    entry     = s.get("entry",0)
+                    close_p   = s.get("close_price",0)
+                    peak      = s.get("peak_pnl_pct",0)
+                    pnl       = s.get("pnl",0)
+                    ex_reason = s.get("exit_reason","unknown")
+                    direction = s.get("direction","long")
+                    if ex_reason == "STOP_IMMEDIATE":
+                        diagnosis = "⚠️ Stop hit immediately — bad entry timing"
+                    elif ex_reason == "STOP_AFTER_PROFIT":
+                        diagnosis = "😤 Was +" + str(peak) + "% peak — profit not protected"
+                    elif ex_reason == "TRAILING_STOP":
+                        diagnosis = "🔒 Trailing stop — TP1 profit secured"
+                    elif ex_reason == "SENTINEL_CLOSE":
+                        diagnosis = "🛡️ Sentinel closed early"
+                    elif win:
+                        diagnosis = "✅ Clean win — levels worked"
+                    else:
+                        diagnosis = "❓ " + ex_reason
+                    msg += (icon + " <b>" + s.get("symbol","?") + " " + direction.upper() + "</b>" + nl2 +
+                            "📍 Entry: $" + str(round(entry,4)) + nl2 +
+                            "📈 Peak: +" + str(round(peak,2)) + "%" + nl2 +
+                            "💰 Exit: $" + str(round(close_p,4)) + " → " + ("+" if pnl>=0 else "") + str(round(pnl,2)) + "$" + nl2 +
+                            "🔍 " + diagnosis + nl2 + nl2)
+                send_message(chat_id, msg)
+
+        elif text == "/help":
+            send_message(chat_id,
+                "📖 <b>CryptoRadar v4.1 — All Commands</b>\n\n"
+                "<b>Trading:</b>\n"
+                "/scan — Manual market scan\n"
+                "/trades — All open trades with full details\n"
+                "/copytrade — Clean copy-paste levels\n"
+                "/portfolio — Balance, P&L, heat\n"
+                "/risk — Risk dashboard\n\n"
+                "<b>Analysis:</b>\n"
+                "/analyse BTC — Deep coin analysis\n"
+                "/intelligence — Live Binance + Fear & Greed\n"
+                "/brain — Bot1 learning stats\n"
+                "/learn — Full brain report\n"
+                "/history — Weekly win rate\n"
+                "/key — Last 10 trade diagnoses\n\n"
+                "<b>System:</b>\n"
+                "/status — Bot status\n"
+                "/pause — Pause alerts\n"
+                "/resume — Resume alerts\n"
+                "flash stop — Stop bot\n"
+                "flash start — Start bot\n\n"
+                "<b>Dual brain:</b>\n"
+                "• Bot1 /brain → Sentinel timing boost\n"
+                "• Sentinel /regime → Bot1 slot limits\n"
+                "• Sentinel /knowledge → score boost\n"
+                "• Fills → instant Sentinel learning"
+            )
+
+# ============================================================
+# MAIN LOOP
+# ============================================================
+def main():
+    global last_update_id, last_scan_time, last_track_time, last_report_date
+    global bot_running, last_quiet_broadcast, last_news_scan
+    logger.info("CryptoRadar v4.1 starting…")
+    logger.info("Brain: "+str(brain["total_closed"])+" trades closed")
+    logger.info("Portfolio: $"+str(portfolio["balance"]))
+
+    # Calculate regime at startup — try Sentinel first, fallback to own
+    logger.info("Getting startup regime...")
+    startup_regime = get_sentinel_regime()
+    _regime_cache["data"] = startup_regime
+    _regime_cache["ts"]   = time.time()
+    logger.info("Regime: " + startup_regime["regime"] + " (source: " +
+                ("Sentinel" if startup_regime.get("note","").find("Sentinel")>=0 else "own") + ")")
+
+    global daily_loss_start
+    today_str  = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    total_val  = portfolio["balance"] + sum(s.get("position_size",0) for s in open_signals if s["status"]=="open")
+    daily_loss_start = {"date": today_str, "start_value": total_val}
+
+    init    = get_updates()
+    results = init.get("result",[])
+    if results: last_update_id = results[-1]["update_id"]+1
+    logger.info("Ready.")
+
+    while True:
+        try:
+            handle_commands()
+            now     = time.time()
+            now_utc = datetime.now(timezone.utc)
+
+            if bot_running and chat_ids and (now-last_news_scan)>=600:
+                last_news_scan = now
+                try:
+                    for item in scan_breaking_news():
+                        broadcast(format_news_alert(item))
+                except Exception as e:
+                    logger.error("News: "+str(e))
+
+            if bot_running and chat_ids and (now-last_scan_time)>=SCAN_INTERVAL_SECONDS:
+                last_scan_time = now
+                try:
+                    btc_bias = "NEUTRAL"
+                    try:
+                        kb = requests.get(SENTINEL_URL.replace("/analyse","/knowledge/BTC"), timeout=5)
+                        if kb.status_code == 200:
+                            btc_bias = kb.json().get("overall_bias","NEUTRAL")
+                            logger.info("BTC bias from Sentinel: "+btc_bias)
+                    except Exception as e:
+                        logger.warning("BTC bias check failed: "+str(e))
+
+                    opps, regime, intel = scan_market()
+                    if opps:
+                        now_hour = now_utc.hour; entered = 0
+                        for o in opps:
+                            if entered >= MAX_TRADES_PER_SCAN: break
+                            direction = o.get("direction","long")
+                            conflict = (direction=="long" and btc_bias=="BEARISH") or \
+                                       (direction=="short" and btc_bias=="BULLISH")
+                            if conflict:
+                                logger.info("BTC conflict blocked: "+o["symbol"]+" "+direction+" (BTC is "+btc_bias+")")
+                                continue
+                            ok, reason = should_enter_trade(o["symbol"],now_hour,o["score"],direction,regime,intel)
+                            learned_wr = get_learned_win_rate(o["symbol"],now_hour,direction)
+                            if ok:
+                                # ── ENTRY TIMING GATE ────────────────────────────────────
+                                # Check that price is confirming at support/resistance NOW.
+                                # Bot1 finds setups early but price may have already moved.
+                                # Only send to Sentinel when the moment is actually right.
+                                #
+                                # KEY FIX: use Sentinel's known support/resistance for the
+                                # proximity check — not Bot1's own estimate. Sentinel's
+                                # level comes from its 264x-tested S/R touch map which is
+                                # far more accurate. ZEC kept getting "stop above support"
+                                # rejections because Bot1's level differed from Sentinel's.
+                                setup_key = o["symbol"]+"_"+direction
+                                if direction == "long":
+                                    support_lvl = o.get("sentinel_support", 0) or o.get("key_level", o.get("entry", 0))
+                                else:
+                                    support_lvl = o.get("sentinel_resistance", 0) or o.get("key_level", o.get("entry", 0))
+                                timing_ok, timing_reason = check_entry_timing(
+                                    o["symbol"], direction, support_lvl)
+
+                                if not timing_ok:
+                                    existing = pending_setups.get(setup_key)
+                                    if not existing:
+                                        pending_setups[setup_key] = {
+                                            "opp": o, "cycles": 1,
+                                            "first_seen": time.time(),
+                                            "direction": direction
+                                        }
+                                        logger.info("Timing wait: "+o["symbol"]+" "+direction+" — "+timing_reason)
+                                    else:
+                                        existing["cycles"] += 1
+                                        if existing["cycles"] > 2:
+                                            del pending_setups[setup_key]
+                                            logger.info("Setup expired: "+o["symbol"]+" "+direction+" (no confirm in 2 cycles)")
+                                        else:
+                                            logger.info("Still waiting: "+o["symbol"]+" "+direction+" cycle "+str(existing["cycles"])+"/2")
+                                    continue  # skip Sentinel this cycle
+
+                                # Confirmed — clear pending and proceed
+                                if setup_key in pending_setups:
+                                    del pending_setups[setup_key]
+                                logger.info("Timing confirmed: "+o["symbol"]+" "+direction+" — "+timing_reason)
+                                # ────────────────────────────────────────────────────────
+
+                                broadcast("🔍 Signal: " + o["symbol"] + " " + direction.upper() + chr(10) + "Asking Sentinel...")
+                                sentinel_ok, sentinel_reason = check_sentinel_approval(o, direction)
+                                if sentinel_ok:
+                                    atr_pct     = o.get("atr_pct",0)/100
+                                    pos_size    = calc_position_size(o["score"],o["symbol"],now_hour,direction,atr_pct)
+                                    limit_entry = o.get("entry", 0)
+                                    try:
+                                        rp = requests.get("https://api.binance.com/api/v3/ticker/price",
+                                                          params={"symbol":o["symbol"]+"USDT"},timeout=5)
+                                        curr_price = float(rp.json().get("price",0)) if rp.status_code==200 else limit_entry
+                                    except: curr_price = limit_entry
+                                    at_level = False
+                                    if direction == "long" and curr_price <= limit_entry * 1.002:
+                                        at_level = True
+                                    elif direction == "short" and curr_price >= limit_entry * 0.998:
+                                        at_level = True
+                                    if at_level:
+                                        broadcast(format_alert(o, pos_size, learned_wr))
+                                        save_signal(o, pos_size, direction)
+                                        notify_sentinel_fill(o["symbol"], direction, curr_price,
+                                                             limit_entry, o.get("sl",0), o.get("tp1",0), o.get("tp2",0))
+                                        logger.info("ENTERED "+direction.upper()+": "+o["symbol"])
+                                        entered += 1
+                                    else:
+                                        already_pending = any(p["symbol"]==o["symbol"] and p["direction"]==direction for p in pending_limit_orders)
+                                        if not already_pending:
+                                            pending_limit_orders.append({
+                                                "symbol":      o["symbol"],
+                                                "direction":   direction,
+                                                "limit_entry": limit_entry,
+                                                "stop":        o.get("sl", 0),
+                                                "tp1":         o.get("tp1", 0),
+                                                "tp2":         o.get("tp2", 0),
+                                                "score":       o.get("score", 0),
+                                                "pos_size":    pos_size,
+                                                "created":     time.time(),
+                                                "expires":     time.time() + 4*3600
+                                            })
+                                            save_json_data("pending_limit_orders.json", pending_limit_orders)
+                                            broadcast("⏳ <b>Limit Order: "+o["symbol"]+" "+direction.upper()+"</b>"+chr(10)+
+                                                      "Waiting for $"+str(round(limit_entry,6))+chr(10)+
+                                                      "Now: $"+str(round(curr_price,6))+" | Expires 4h")
+                                        entered += 1
+                                else:
+                                    broadcast("🚫 <b>BLOCKED</b>: "+o["symbol"]+" "+direction+" — "+sentinel_reason)
+                            else:
+                                if "Max" in reason or "Already" in reason:
+                                    broadcast(format_alert_info(o, learned_wr, reason))
+                                else:
+                                    logger.info("SKIPPED "+o["symbol"]+" ("+direction+"): "+reason)
+                    else:
+                        if now-last_quiet_broadcast>=10800:
+                            broadcast(human_quiet_message())
+                            last_quiet_broadcast = now
+                except Exception as e:
+                    logger.error("Main scan error: " + str(e))
+
+            if (now-last_track_time)>=TRACK_INTERVAL_SECONDS:
+                last_track_time = now
+                track_open_signals()
+                check_pending_limit_orders()
+
+            current_date = now_utc.strftime("%Y-%m-%d")
+            if now_utc.hour==DAILY_REPORT_HOUR_UTC and last_report_date!=current_date:
+                last_report_date = current_date
+                # send_daily_report()  # implement if needed
+                new_total = portfolio["balance"] + sum(s.get("position_size",0) for s in open_signals if s["status"]=="open")
+                daily_loss_start["date"]        = current_date
+                daily_loss_start["start_value"] = new_total
+
+            time.sleep(1)
+
+        except KeyboardInterrupt:
+            logger.info("Bot stopped.")
+            break
+        except Exception as e:
+            logger.error("Main loop: "+str(e))
+            time.sleep(5)
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
+if __name__ == "__main__":
+    bot_thread = threading.Thread(target=main, daemon=True)
+    bot_thread.start()
+    app.run(host="0.0.0.0", port=8080)
