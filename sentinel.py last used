@@ -1202,6 +1202,50 @@ def run_sentinel_analysis(signal):
     sent_entry=sent_stop=sent_tp1=sent_tp2=0
     if approved:
         ck3=coin_knowledge.get(symbol,{}); sup=ck3.get("support",0); res=ck3.get("resistance",0)
+        # ── SMART LEVEL SELECTION (touch-map based) ────────────────────────
+        # If sr_touch_map has a more-tested level near the current support/resistance,
+        # use that instead. This keeps strong coins (BCH/LTC/BTC at 0.000% dist)
+        # using their already-good levels, but upgrades weak coins (ZEC/CHZ filling
+        # at 0.18-0.27% dist) to higher-touch supports for better fill precision.
+        # Rules:
+        #   - Search within 5% of current price reference
+        #   - Minimum 200 touches to qualify as "good" level
+        #   - If found → use it, log the upgrade
+        #   - If not found → fall back to coin_knowledge level (current behavior)
+        # NOTE: This does NOT change stop/TP formulas, only which level seeds them.
+        smart_sup = 0; smart_res = 0
+        try:
+            tm = sr_touch_map.get(symbol, {})
+            ref_price = float(entry) if entry else (sup if direction=="long" else res)
+            if ref_price > 0:
+                if direction == "long":
+                    candidates = [lvl for lvl in tm.get("support", [])
+                                  if lvl.get("touches", 0) >= 200
+                                  and lvl.get("level", 0) > 0
+                                  and abs(lvl["level"] - ref_price) / ref_price < 0.05
+                                  and lvl["level"] <= ref_price * 1.005]  # support must be at or below price
+                    if candidates:
+                        best = max(candidates, key=lambda x: x.get("touches", 0))
+                        smart_sup = best["level"]
+                        logger.info("Smart level: "+symbol+" LONG using support $"+str(smart_sup)+
+                                    " ("+str(best["touches"])+" touches) instead of $"+str(sup))
+                else:
+                    candidates = [lvl for lvl in tm.get("resistance", [])
+                                  if lvl.get("touches", 0) >= 200
+                                  and lvl.get("level", 0) > 0
+                                  and abs(lvl["level"] - ref_price) / ref_price < 0.05
+                                  and lvl["level"] >= ref_price * 0.995]  # resistance at or above price
+                    if candidates:
+                        best = max(candidates, key=lambda x: x.get("touches", 0))
+                        smart_res = best["level"]
+                        logger.info("Smart level: "+symbol+" SHORT using resistance $"+str(smart_res)+
+                                    " ("+str(best["touches"])+" touches) instead of $"+str(res))
+        except Exception as e:
+            logger.error("Smart level selection error: "+str(e))
+        # If smart level found, override the support/resistance
+        if smart_sup > 0: sup = smart_sup
+        if smart_res > 0: res = smart_res
+        # ─────────────────────────────────────────────────────────────────
         if direction=="long":
             if not sup: sup=round(float(entry)*0.97,6) if entry else 0
             sent_entry=sup; sent_stop=round(sup*0.992,6); risk=sent_entry-sent_stop
@@ -1360,6 +1404,17 @@ def check_and_alert_btc_premove():
         "Confidence: "+str(round(conf*100))+"%"+nl+nl+"<b>Signals:</b>"+nl+sig_text+sim_str+nl+nl+
         "📍 Big move incoming. Get ready."+nl+"⏰ "+datetime.now(timezone.utc).strftime("%H:%M UTC"))
     _pre_move_sent["btc"]=now
+    # Track bearish-only timestamp — used by bounce detection in /suggest
+    # ONLY updates on BEARISH signals so bounce detection doesn't fire after bullish alerts
+    if bias=="bearish":
+        _pre_move_sent["btc_bearish"]=now
+        _pre_move_sent["btc_bearish_price"]=0  # will be set to BTC price at time of alert
+        try:
+            r=requests.get("https://api.binance.com/api/v3/ticker/price",
+                          params={"symbol":"BTCUSDT"},timeout=5)
+            if r.status_code==200:
+                _pre_move_sent["btc_bearish_price"]=float(r.json().get("price",0))
+        except Exception: pass
 
 # ============================================================
 # FLASK ENDPOINTS — UNCHANGED TRADING LOGIC
@@ -2225,63 +2280,81 @@ def handle_commands():
                     logger.info("/suggest blocked — BTC pre-move BEARISH active (conf "+str(round(pm_conf*100))+"%)")
                     continue
 
-                # ── BOUNCE DETECTION ─────────────────────────────────────────
-                # If no active bearish pre-move NOW, but one fired recently (within 2h)
-                # → dump likely happened → check if BTC is bouncing at support
-                # This is where the highest probability pullback longs form
+                # ── BOUNCE DETECTION (rebuilt) ────────────────────────────────
+                # Only fires when:
+                # 1. A BEARISH pre-move alert was sent recently (btc_bearish timestamp)
+                # 2. BTC actually dropped since the alert (dump validated by price)
+                # 3. No active bearish signal now (dump is over)
+                # This gives the re-entry signal after the dump completes
                 now_ts = time.time()
-                last_bearish_alert = _pre_move_sent.get("btc", 0)
-                dump_happened_recently = (now_ts - last_bearish_alert) < 7200  # 2 hours
-                if dump_happened_recently and (not pm_det or pm_bias != "bearish"):
+                last_bearish = _pre_move_sent.get("btc_bearish", 0)
+                bearish_price = _pre_move_sent.get("btc_bearish_price", 0)
+                bearish_recently = (now_ts - last_bearish) < 7200  # within 2 hours
+                no_active_bearish = not (pm_det and pm_bias == "bearish")
+
+                if bearish_recently and no_active_bearish and bearish_price > 0:
                     try:
-                        # Get BTC current price and support level
-                        btc_ck = coin_knowledge.get("BTC", {})
-                        btc_sup = btc_ck.get("support", 0)
+                        # Validate dump actually happened — BTC must have dropped
                         r_btc = requests.get("https://api.binance.com/api/v3/klines",
-                                            params={"symbol":"BTCUSDT","interval":"15m","limit":5},
+                                            params={"symbol":"BTCUSDT","interval":"15m","limit":10},
                                             timeout=6)
-                        btc_candles = r_btc.json() if r_btc.status_code == 200 else []
-                        if btc_candles and btc_sup:
-                            last_c = btc_candles[-1]
-                            btc_open  = float(last_c[1])
-                            btc_close = float(last_c[4])
-                            btc_low   = float(last_c[3])
-                            btc_price = btc_close
-                            # Bounce conditions:
-                            # 1. Price near support (within 2%)
-                            # 2. Current candle is bullish (close > open)
-                            # 3. Price recovered from the low
-                            near_support = btc_sup > 0 and abs(btc_price - btc_sup) / btc_price < 0.02
-                            bullish_candle = btc_close > btc_open
-                            recovered = btc_close > btc_low * 1.002
-                            if near_support and bullish_candle and recovered:
-                                mins_ago = round((now_ts - last_bearish_alert) / 60)
-                                send_message(
-                                    "🎯 <b>BTC PULLBACK OPPORTUNITY</b>"+nl+nl+
-                                    "Dump from "+str(mins_ago)+"min ago — bounce forming now."+nl+nl+
-                                    "📍 BTC near support: $"+str(round(btc_sup, 0))+nl+
-                                    "💰 BTC now: $"+str(round(btc_price, 0))+nl+
-                                    "✅ Bullish candle confirming on 15min"+nl+nl+
-                                    "⚡ <b>This is the pullback entry window.</b>"+nl+
-                                    "Money is made on the bounce — entries below are high probability."+nl+nl+
-                                    "🔍 Generating best setups now...",
-                                    chat_id)
-                                logger.info("Bounce opportunity detected — dump "+str(mins_ago)+"min ago, BTC near $"+str(btc_sup))
+                        if r_btc.status_code == 200:
+                            btc_candles = r_btc.json()
+                            btc_ck      = coin_knowledge.get("BTC", {})
+                            btc_sup     = btc_ck.get("support", 0)
+                            cur_close   = float(btc_candles[-1][4])
+                            cur_open    = float(btc_candles[-1][1])
+                            cur_low     = float(btc_candles[-1][3])
+                            prev_close  = float(btc_candles[-2][4])
+
+                            # Dump validation: price dropped at least 0.5% from bearish alert price
+                            dump_confirmed = bearish_price > 0 and cur_close < bearish_price * 0.995
+                            mins_ago = round((now_ts - last_bearish) / 60)
+
+                            if dump_confirmed:
+                                # Bounce conditions:
+                                # 1. Near support (within 2%)
+                                # 2. Current candle bullish (close > open)
+                                # 3. Price recovered from candle low
+                                # 4. Previous candle also showing recovery
+                                near_support   = btc_sup > 0 and abs(cur_close - btc_sup) / cur_close < 0.02
+                                bullish_candle = cur_close > cur_open
+                                recovered      = cur_close > cur_low * 1.002
+                                prev_recovery  = prev_close > float(btc_candles[-2][1])  # prev candle green
+
+                                if bullish_candle and recovered and (near_support or prev_recovery):
+                                    send_message(
+                                        "🎯 <b>BTC PULLBACK OPPORTUNITY</b>"+nl+nl+
+                                        "Dump confirmed "+str(mins_ago)+"min ago (dropped "+
+                                        str(round((bearish_price-cur_close)/bearish_price*100,2))+"%)"+nl+nl+
+                                        "📍 BTC near support: $"+str(round(btc_sup,0) if btc_sup else "N/A")+nl+
+                                        "💰 BTC now: $"+str(round(cur_close,0))+nl+
+                                        "✅ Bounce confirming on 15min"+nl+nl+
+                                        "⚡ <b>This is the pullback entry window.</b>"+nl+
+                                        "Money is made on the bounce — entries below are high probability."+nl+nl+
+                                        "🔍 Generating best setups now...",
+                                        chat_id)
+                                    logger.info("Bounce confirmed: BTC dropped "+
+                                               str(round((bearish_price-cur_close)/bearish_price*100,2))+
+                                               "% then bouncing | now $"+str(cur_close))
+                                else:
+                                    send_message(
+                                        "⏳ <b>Post-dump — Watching for bounce</b>"+nl+nl+
+                                        "BTC dropped "+str(round((bearish_price-cur_close)/bearish_price*100,2))+
+                                        "% since dump alert ("+str(mins_ago)+"min ago)."+nl+
+                                        "Bounce not yet confirmed — waiting for bullish candle."+nl+nl+
+                                        "💡 Press /suggest again once BTC shows a green candle.",
+                                        chat_id)
+                                    logger.info("Post-dump waiting: BTC dropped but no bounce yet")
                             else:
-                                # Dump happened but bounce not confirmed yet
-                                send_message(
-                                    "⏳ <b>Post-dump — Waiting for bounce confirmation</b>"+nl+nl+
-                                    "BTC dump happened "+str(round((now_ts-last_bearish_alert)/60))+"min ago."+nl+
-                                    "Bounce not yet confirmed — price still unstable."+nl+nl+
-                                    "💡 Showing available setups but be cautious."+nl+
-                                    "Wait for BTC to hold support before entering.",
-                                    chat_id)
-                                logger.info("Post-dump caution mode — bounce not confirmed yet")
+                                # Bearish alert fired but price barely moved — no real dump
+                                logger.info("Bearish alert "+str(mins_ago)+"min ago but no dump (price diff "+
+                                           str(round((bearish_price-cur_close)/bearish_price*100,3))+"%) — suggest normally")
                     except Exception as e:
                         logger.error("Bounce detection error: "+str(e))
                 # ─────────────────────────────────────────────────────────────
 
-                elif pm_det and pm_bias == "bullish" and len(pm_signals) >= 2:
+                if pm_det and pm_bias == "bullish" and len(pm_signals) >= 2:
                     send_message(
                         "🟢 <b>BTC PRE-MOVE BULLISH ACTIVE</b>"+nl+
                         "Confidence: "+str(round(pm_conf*100))+"%"+nl+
@@ -2815,3 +2888,4 @@ if __name__=="__main__":
     threading.Thread(target=continuous_chart_watcher,daemon=True).start()
     threading.Thread(target=fast_trade_monitor,daemon=True).start()
     app.run(host="0.0.0.0",port=8081)
+
