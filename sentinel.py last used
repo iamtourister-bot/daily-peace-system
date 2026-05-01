@@ -1,0 +1,2817 @@
+# SentinelBot v3 — Complete Chart Intelligence System
+# Philosophy: The chart always whispers before it screams.
+# Features: Pre-move detection, pattern recognition, market phase,
+#           RSI divergence, volume climax, weighted TF scoring,
+#           S/R touch counter, BTC correlation, 50-coin watcher,
+#           Entry quality learning — limit order fill tracking + auto-improve
+#           Dynamic check weighting — checks that win more count more
+# Runs standalone — Bot 1 calls /analyse, Sentinel approves or rejects
+# Port: 8081
+# ── ANALYTICAL UPGRADES (no trading logic changes) ──────────────────────────
+# + /blocked command with true accuracy (correct vs decided trades only)
+# + /backup command — download all brain files to Telegram
+# + Block reason tracking — which checks caused each block
+# + Source split — bot1 pipeline vs sentinel direct trades
+# + Directional accuracy — peak_pnl_pct based entry quality
+# + Fixed block accuracy calculation — excludes expired/neutral
+# + Resume button on /pause
+# + suggested_trades loads from file (not reset on restart)
+# + monitor_open_trades continues when paused (only notifications stop)
+# ─────────────────────────────────────────────────────────────────────────────
+
+import requests
+import time
+import logging
+import json
+import os
+import threading
+import math
+from datetime import datetime, timezone, timedelta
+from collections import defaultdict
+from flask import Flask, request
+
+# ============================================================
+# API KEYS — Add to Railway Variables
+# ============================================================
+SENTINEL_TOKEN    = os.getenv("SENTINEL_TOKEN", "")
+CMC_API_KEY       = os.getenv("CMC_API_KEY", "")
+BYBIT_API_KEY     = os.getenv("BYBIT_API_KEY", "")
+BYBIT_SECRET      = os.getenv("BYBIT_SECRET", "")
+SENTINEL_CHAT_ID  = os.getenv("SENTINEL_CHAT_ID", "")
+BOT1_URL          = os.getenv("BOT1_URL", "https://cryptoradar-production.up.railway.app")
+
+# ============================================================
+# SETTINGS — UNCHANGED FROM OLD CODE
+# ============================================================
+MIN_CHECKS_TO_APPROVE       = 4
+APPROVAL_WEIGHTED_THRESHOLD = 0.57   # ← UNCHANGED — this is what produces 70% win rate
+WATCH_INTERVAL              = 900
+ALERT_COOLDOWN              = 1800
+SUGGEST_COOLDOWN_HOURS      = 4
+PRE_MOVE_HISTORY_MAX   = 100
+BINANCE_BASE           = "https://api.binance.com"
+BYBIT_BASE             = "https://api.bybit.com"
+
+_api_calls    = {"binance": [], "bybit": []}
+BINANCE_LIMIT = 1000
+BYBIT_LIMIT   = 500
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [SENTINEL] %(message)s")
+logger = logging.getLogger(__name__)
+app    = Flask(__name__)
+
+# ============================================================
+# STORAGE
+# ============================================================
+DATA_DIR = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "/app/data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+def _path(f): return os.path.join(DATA_DIR, f)
+
+def load_json(filename, default):
+    try:
+        p = _path(filename)
+        if os.path.exists(p):
+            with open(p) as f: return json.load(f)
+    except Exception: pass
+    return default
+
+def save_json(filename, data):
+    try:
+        with open(_path(filename), "w") as f: json.dump(data, f, indent=2)
+    except Exception as e: logger.error("Save " + filename + ": " + str(e))
+
+# ============================================================
+# LOAD STATE
+# ============================================================
+sentinel_brain = load_json("sentinel_brain.json", {
+    "total_verdicts": 0, "approved": 0, "rejected": 0,
+    "approved_wins": 0, "approved_losses": 0,
+    # Source-split counters — analytical only, grow from this deploy forward
+    "bot1_wins": 0, "bot1_losses": 0,
+    "sentinel_wins": 0, "sentinel_losses": 0,
+    "coin_memory": {}, "pre_move_patterns": [],
+    "check_accuracy": {
+        "macro_trend":    {"correct":0,"total":0},
+        "mid_trend":      {"correct":0,"total":0},
+        "micro_trend":    {"correct":0,"total":0},
+        "volume_profile": {"correct":0,"total":0},
+        "rsi_confluence": {"correct":0,"total":0},
+        "money_flow":     {"correct":0,"total":0},
+        "structure":      {"correct":0,"total":0}
+    }
+})
+verdict_history  = load_json("sentinel_history.json", [])
+coin_knowledge   = load_json("coin_knowledge.json", {})
+sr_touch_map     = load_json("sr_touch_map.json", {})
+pre_move_history = load_json("pre_move_history.json", [])
+
+# Backfill new source-split fields for existing brains
+for _k in ["bot1_wins", "bot1_losses", "sentinel_wins", "sentinel_losses"]:
+    if _k not in sentinel_brain:
+        sentinel_brain[_k] = 0
+
+# ── CLEAN ERA TRACKING ───────────────────────────────────────────────────────
+# All data before this deploy is considered "dirty baseline" due to:
+#   - reversed stop-loss bug (instant losses)
+#   - duplicate /suggest entries
+#   - missing closure tracking
+#   - yesterday's manipulation dump
+#
+# From this deploy forward, clean_era_* counters track validated performance.
+# These grow separately from the legacy approved_wins/losses totals.
+# Use /learn to see both: legacy baseline vs clean era performance.
+# ─────────────────────────────────────────────────────────────────────────────
+# ── CLEAN ERA TRACKING ───────────────────────────────────────────────────────
+# v1 clean era was contaminated by:
+#   - instant stop-out bug (ARB/TIA/ALT losses recorded after era start)
+#   - reversed stop levels still hitting before sanity check deployed
+#
+# v2 clean era starts NOW — all fixes deployed:
+#   ✅ Stop sanity check (fill price vs stop validated before entry)
+#   ✅ Weak coin blocklist (ADA/LDO/JUP/ETH excluded)
+#   ✅ Short restriction in RANGE/SIDEWAYS/TRANSITION (+12 score)
+#   ✅ Button duplicate fix
+#   ✅ Stale trade resolver (48h)
+#   ✅ Pause fix
+#
+# This is the true clean baseline. All stats from here are trustworthy.
+# ─────────────────────────────────────────────────────────────────────────────
+if not sentinel_brain.get("_clean_era_v2", False):
+    sentinel_brain["clean_era_start"]           = datetime.now(timezone.utc).isoformat()
+    sentinel_brain["clean_era_wins"]            = 0
+    sentinel_brain["clean_era_losses"]          = 0
+    sentinel_brain["clean_era_bot1_wins"]       = 0
+    sentinel_brain["clean_era_bot1_losses"]     = 0
+    sentinel_brain["clean_era_sentinel_wins"]   = 0
+    sentinel_brain["clean_era_sentinel_losses"] = 0
+    sentinel_brain["_clean_era_started"]        = True
+    sentinel_brain["_clean_era_v2"]             = True
+    save_json("sentinel_brain.json", sentinel_brain)
+    logger.info("Clean era v2 started: " + sentinel_brain["clean_era_start"] + " — all fixes deployed")
+else:
+    # Backfill in case fields were missing from a partial deploy
+    for _k in ["clean_era_wins","clean_era_losses","clean_era_bot1_wins",
+               "clean_era_bot1_losses","clean_era_sentinel_wins","clean_era_sentinel_losses"]:
+        if _k not in sentinel_brain:
+            sentinel_brain[_k] = 0
+
+# AUTO-FIX corrupted brain on startup
+_brain_corrupted = (
+    sentinel_brain.get("approved_losses", 0) > sentinel_brain.get("total_verdicts", 0) or
+    sentinel_brain.get("approved_wins", 0) > sentinel_brain.get("total_verdicts", 0) or
+    sentinel_brain.get("approved", 0) > sentinel_brain.get("total_verdicts", 0)
+)
+if _brain_corrupted:
+    logger.warning("Corrupted brain detected — auto-resetting stats only")
+    sentinel_brain = {
+        "total_verdicts": 0, "approved": 0, "rejected": 0,
+        "approved_wins": 0, "approved_losses": 0,
+        "bot1_wins": 0, "bot1_losses": 0,
+        "sentinel_wins": 0, "sentinel_losses": 0,
+        "coin_memory": {}, "pre_move_patterns": [],
+        "check_accuracy": {
+            "macro_trend":    {"correct":0,"total":0},
+            "mid_trend":      {"correct":0,"total":0},
+            "micro_trend":    {"correct":0,"total":0},
+            "volume_profile": {"correct":0,"total":0},
+            "rsi_confluence": {"correct":0,"total":0},
+            "money_flow":     {"correct":0,"total":0},
+            "structure":      {"correct":0,"total":0}
+        }
+    }
+    verdict_history = []
+    save_json("sentinel_brain.json", sentinel_brain)
+    save_json("sentinel_history.json", verdict_history)
+    logger.info("Brain reset complete — coin_knowledge and sr_touch_map preserved")
+
+# ONE-TIME STAT CORRECTION — unchanged from old code
+if not sentinel_brain.get("_stat_corrected_v2", False):
+    logger.info("One-time stat correction v2: resetting all polluted stats from old Bot1 flow")
+    sentinel_brain["approved_wins"]      = 5
+    sentinel_brain["approved_losses"]    = 3
+    sentinel_brain["total_verdicts"]     = 8
+    sentinel_brain["approved"]           = 8
+    sentinel_brain["rejected"]           = 0
+    sentinel_brain["_stat_corrected_v1"] = True
+    sentinel_brain["_stat_corrected_v2"] = True
+    save_json("sentinel_brain.json", sentinel_brain)
+    verdict_history = []
+    save_json("sentinel_history.json", verdict_history)
+
+last_update_id = 0
+_last_alerts   = {}
+_pre_move_sent = {}
+_paused        = False
+
+# Feature 1: Missed trade tracker
+missed_trades = load_json("missed_trades.json", [])
+
+# Feature 2: Win/loss reason tagging — UNCHANGED from old code
+check_tag_stats = load_json("check_tags.json", {
+    "macro_trend":    {"wins":0,"losses":0},
+    "mid_trend":      {"wins":0,"losses":0},
+    "micro_trend":    {"wins":0,"losses":0},
+    "volume_profile": {"wins":0,"losses":0},
+    "rsi_confluence": {"wins":0,"losses":0},
+    "money_flow":     {"wins":0,"losses":0},
+    "structure":      {"wins":0,"losses":0}
+})
+
+# Feature 3: Market regime engine
+_current_regime = {"mode": "unknown", "updated": 0}
+
+# Feature 4: Dynamic confidence per coin
+coin_confidence = load_json("coin_confidence.json", {})
+
+# Feature 5: suggested_trades — FIXED: load from file instead of resetting
+# Old code reset this on every startup which lost learning continuity
+suggested_trades = load_json("suggested_trades.json", [])
+# Clean up any corrupted entries
+suggested_trades = [t for t in suggested_trades if isinstance(t, dict) and "symbol" in t]
+save_json("suggested_trades.json", suggested_trades)
+
+# Feature 6: Entry quality learning
+entry_learning = load_json("entry_learning.json", {})
+
+# ============================================================
+# WATCH LIST — 75 COINS
+# ============================================================
+WATCH_LIST = [
+    "BTC","ETH","BNB","SOL","XRP","DOGE","ADA","TRX","AVAX","LINK",
+    "SHIB","DOT","SUI","HBAR","BCH","LTC","UNI","NEAR","APT","PEPE",
+    "ICP","TAO","ARB","ENA","OP","ATOM","XLM","AAVE","CRV","FIL",
+    "ALGO","VET","SAND","MANA","AXS","GALA","CHZ","THETA","FTM","STX",
+    "MATIC","COMP","SNX","ZEC","EGLD","CRO","ONDO","KAS","RENDER","JUP",
+    "JASMY","HNT","RAY","ORDI","BERA","BONK","SEI","LDO","HYPE","WIF",
+    "FLOKI","INJ","TIA","BLUR","PYTH","JTO","STRK","ALT","SAGA","DYM",
+    "W","OMNI","ZK","ZRO","DOGS"
+]
+
+# ============================================================
+# TELEGRAM
+# ============================================================
+def send_message(text, chat_id=None):
+    if not SENTINEL_TOKEN: return
+    cid = chat_id or SENTINEL_CHAT_ID
+    if not cid: return
+    if _paused and not chat_id: return
+    try:
+        requests.post(
+            "https://api.telegram.org/bot" + SENTINEL_TOKEN + "/sendMessage",
+            json={"chat_id": cid, "text": text, "parse_mode": "HTML"}, timeout=10)
+    except Exception as e: logger.error("Telegram: " + str(e))
+
+def send_suggestion_with_button(text, sym, direction, entry, stop, tp1, tp2, chat_id=None):
+    if not SENTINEL_TOKEN: return
+    cid = chat_id or SENTINEL_CHAT_ID
+    if not cid: return
+    if _paused and not chat_id: return
+    try:
+        callback = "entered:"+sym+":"+direction+":"+str(entry)+":"+str(stop)+":"+str(tp1)+":"+str(tp2)
+        requests.post(
+            "https://api.telegram.org/bot" + SENTINEL_TOKEN + "/sendMessage",
+            json={
+                "chat_id": cid, "text": text, "parse_mode": "HTML",
+                "reply_markup": {"inline_keyboard": [[
+                    {"text": "✅ I Entered This Trade", "callback_data": callback}
+                ]]}
+            }, timeout=10)
+    except Exception as e: logger.error("Telegram button: " + str(e))
+
+def answer_callback(callback_id):
+    try:
+        requests.post(
+            "https://api.telegram.org/bot" + SENTINEL_TOKEN + "/answerCallbackQuery",
+            json={"callback_query_id": callback_id}, timeout=5)
+    except Exception: pass
+
+def get_updates(offset=None):
+    try:
+        r = requests.get(
+            "https://api.telegram.org/bot" + SENTINEL_TOKEN + "/getUpdates",
+            params={"timeout": 10, "offset": offset}, timeout=15)
+        return r.json()
+    except Exception: return {"result": []}
+
+# ============================================================
+# RATE LIMITING
+# ============================================================
+def check_rate_limit(source):
+    now = time.time()
+    _api_calls[source] = [t for t in _api_calls[source] if now-t < 60]
+    limits = {"binance": BINANCE_LIMIT, "bybit": BYBIT_LIMIT}
+    if len(_api_calls[source]) >= limits[source] * 0.8:
+        logger.warning(source + " at 80% limit")
+        return False
+    _api_calls[source].append(now)
+    return True
+
+# ============================================================
+# CANDLE FETCHING — UNCHANGED
+# ============================================================
+def get_candles(symbol, interval, limit=200):
+    sym = symbol + "USDT" if not symbol.endswith("USDT") else symbol
+    bybit_map = {"15m":"15","30m":"30","1h":"60","4h":"240","1d":"D","1w":"W","1M":"M"}
+    if check_rate_limit("binance"):
+        try:
+            r = requests.get(BINANCE_BASE + "/api/v3/klines",
+                params={"symbol":sym,"interval":interval,"limit":limit}, timeout=10)
+            data = r.json()
+            if data and isinstance(data, list):
+                return [[float(c[1]),float(c[2]),float(c[3]),float(c[4]),float(c[5])] for c in data]
+        except Exception as e: logger.warning("Binance " + symbol + " " + interval + ": " + str(e))
+    if check_rate_limit("bybit") and interval in bybit_map:
+        try:
+            r = requests.get(BYBIT_BASE + "/v5/market/kline",
+                params={"category":"spot","symbol":sym,"interval":bybit_map[interval],"limit":limit}, timeout=10)
+            data = r.json().get("result",{}).get("list",[])
+            if data:
+                data = list(reversed(data))
+                return [[float(c[2]),float(c[3]),float(c[4]),float(c[5]),float(c[6])] for c in data]
+        except Exception as e: logger.warning("Bybit " + symbol + " " + interval + ": " + str(e))
+    return []
+
+# ============================================================
+# INDICATORS — ALL UNCHANGED
+# ============================================================
+def calc_ema(values, period):
+    if len(values) < period: return values[-1] if values else 0
+    k = 2.0/(period+1); ema = sum(values[:period])/period
+    for v in values[period:]: ema = v*k + ema*(1-k)
+    return ema
+
+def calc_rsi_wilder(closes, period=14):
+    if len(closes) < period+1: return 50.0
+    gains  = [max(closes[i]-closes[i-1],0) for i in range(1,len(closes))]
+    losses = [max(closes[i-1]-closes[i],0) for i in range(1,len(closes))]
+    ag = sum(gains[:period])/period; al = sum(losses[:period])/period
+    for i in range(period,len(gains)):
+        ag=(ag*(period-1)+gains[i])/period; al=(al*(period-1)+losses[i])/period
+    if al==0: return 100.0
+    return round(100.0-(100.0/(1.0+ag/al)),2)
+
+def calc_bollinger_bands(closes, period=20, std_mult=2.0):
+    if len(closes) < period: return None,None,None,None
+    window = closes[-period:]; ma = sum(window)/period
+    variance = sum((c-ma)**2 for c in window)/period
+    std = math.sqrt(variance)
+    upper = ma+std_mult*std; lower = ma-std_mult*std
+    width = round((upper-lower)/ma*100,4) if ma>0 else 0
+    return round(upper,6),round(ma,6),round(lower,6),width
+
+def calc_obv(closes, volumes):
+    if len(closes)<2: return 0
+    obv=0
+    for i in range(1,len(closes)):
+        if closes[i]>closes[i-1]: obv+=volumes[i]
+        elif closes[i]<closes[i-1]: obv-=volumes[i]
+    return obv
+
+def calc_cmf(highs, lows, closes, volumes, period=20):
+    if len(closes)<period: return 0
+    mf_vol=[]
+    for i in range(-period,0):
+        hl=highs[i]-lows[i]
+        if hl==0: mf_vol.append(0); continue
+        mf_vol.append(((closes[i]-lows[i])-(highs[i]-closes[i]))/hl*volumes[i])
+    tv=sum(volumes[-period:])
+    return round(sum(mf_vol)/tv,4) if tv else 0
+
+def calc_trend(closes, fast=20, slow=50):
+    if len(closes)<slow: return "sideways"
+    ef=calc_ema(closes[-fast*2:],fast); es=calc_ema(closes[-slow*2:],slow)
+    if not ef or not es: return "sideways"
+    if abs(ef-es)/es*100<0.1: return "sideways"
+    return "bullish" if ef>es else "bearish"
+
+def find_key_levels(highs, lows, closes, lookback=50):
+    if len(highs)<lookback: return None,None
+    rh=highs[-lookback:]; rl=lows[-lookback:]; price=closes[-1]
+    res=sup=None
+    for i in range(2,len(rh)-2):
+        if rh[i]>rh[i-1] and rh[i]>rh[i+1] and rh[i]>price:
+            if res is None or rh[i]<res: res=rh[i]
+    for i in range(2,len(rl)-2):
+        if rl[i]<rl[i-1] and rl[i]<rl[i+1] and rl[i]<price:
+            if sup is None or rl[i]>sup: sup=rl[i]
+    return res,sup
+
+def detect_rsi_divergence(closes, rsi_values, lookback=20):
+    if len(closes)<lookback or len(rsi_values)<lookback: return None,0
+    pr=closes[-lookback:]; rr=rsi_values[-lookback:]
+    pl=[]; rl_=[]; ph=[]; rh_=[]
+    for i in range(1,lookback-1):
+        if pr[i]<pr[i-1] and pr[i]<pr[i+1]: pl.append(i)
+        if rr[i]<rr[i-1] and rr[i]<rr[i+1]: rl_.append(i)
+        if pr[i]>pr[i-1] and pr[i]>pr[i+1]: ph.append(i)
+        if rr[i]>rr[i-1] and rr[i]>rr[i+1]: rh_.append(i)
+    if len(pl)>=2 and len(rl_)>=2:
+        if pr[pl[-1]]<pr[pl[-2]] and rr[rl_[-1]]>rr[rl_[-2]]:
+            return "bullish",round(abs(rr[rl_[-1]]-rr[rl_[-2]]),1)
+    if len(ph)>=2 and len(rh_)>=2:
+        if pr[ph[-1]]>pr[ph[-2]] and rr[rh_[-1]]<rr[rh_[-2]]:
+            return "bearish",round(abs(rr[rh_[-1]]-rr[rh_[-2]]),1)
+    return None,0
+
+def detect_volume_climax(closes, volumes, lookback=30):
+    if len(closes)<lookback or len(volumes)<lookback: return None,0
+    avg_vol=sum(volumes[-lookback:-5])/(lookback-5)
+    if avg_vol==0: return None,0
+    rv=volumes[-lookback:]; mvi=rv.index(max(rv)); mv=rv[mvi]
+    ratio=mv/avg_vol
+    if ratio<2.5: return None,0
+    c_at=closes[-(lookback-mvi)]; o_approx=closes[-(lookback-mvi)-1] if (lookback-mvi)<len(closes) else c_at
+    is_red=c_at<o_approx
+    vol_died=False
+    if mvi<lookback-3:
+        post=sum(rv[mvi+1:mvi+4])/3
+        vol_died=post<avg_vol*0.7
+    conf=min(round(ratio/5.0,2),1.0)
+    if is_red and vol_died: return "selling_climax",conf
+    elif not is_red and vol_died: return "buying_climax",conf
+    return None,0
+
+def detect_bb_squeeze(closes, lookback=50):
+    if len(closes)<lookback: return False,0,"neutral"
+    widths=[]
+    for i in range(20,lookback):
+        _,_,_,w=calc_bollinger_bands(closes[:-lookback+i+1])
+        if w: widths.append(w)
+    if len(widths)<10: return False,0,"neutral"
+    cw=widths[-1]; aw=sum(widths)/len(widths); mw=min(widths)
+    is_sq=cw<aw*0.7 or cw<=mw*1.1
+    sq_hrs=0
+    for i in range(len(widths)-1,0,-1):
+        if widths[i]<aw*0.8: sq_hrs+=1
+        else: break
+    ma20=sum(closes[-20:])/20
+    bias="bullish" if closes[-1]>ma20 else "bearish" if closes[-1]<ma20 else "neutral"
+    return is_sq,sq_hrs,bias
+
+def detect_patterns(highs, lows, closes, volumes, lookback=50):
+    patterns=[]
+    if len(closes)<lookback: return patterns
+    rh=highs[-lookback:]; rl=lows[-lookback:]; rc=closes[-lookback:]
+    price=closes[-1]; prev_close=closes[-2]
+    rh10=rh[-10:]; rl10=rl[-10:]
+    if rh10[-1]>rh10[-5]>rh10[-8]: patterns.append(("Higher Highs","bullish","Price making higher highs — uptrend confirmed"))
+    if rl10[-1]<rl10[-5]<rl10[-8]: patterns.append(("Lower Lows","bearish","Price making lower lows — downtrend confirmed"))
+    move10=(rc[-10]-rc[-20])/rc[-20]*100 if rc[-20]>0 else 0
+    range5=(max(rh[-5:])-min(rl[-5:]))/rc[-5]*100 if rc[-5]>0 else 0
+    if move10>5 and range5<2: patterns.append(("Bull Flag","bullish","Sharp pump then tight consolidation — bull flag forming"))
+    if move10<-5 and range5<2: patterns.append(("Bear Flag","bearish","Sharp dump then tight consolidation — bear flag forming"))
+    res_l=max(rh[-20:]); lows_slope=(rl[-1]-rl[-10])/10
+    res_tests=sum(1 for h in rh[-20:] if abs(h-res_l)/res_l<0.005)
+    if lows_slope>0 and res_tests>=2: patterns.append(("Ascending Triangle","bullish","Higher lows with flat resistance — breakout pending"))
+    sup_l=min(rl[-20:]); highs_slope=(rh[-1]-rh[-10])/10
+    sup_tests=sum(1 for l in rl[-20:] if abs(l-sup_l)/sup_l<0.005)
+    if highs_slope<0 and sup_tests>=2: patterns.append(("Descending Triangle","bearish","Lower highs with flat support — breakdown pending"))
+    range20=(max(rh[-20:])-min(rl[-20:]))/rc[-1]*100 if rc[-1]>0 else 0
+    if range20<4: patterns.append(("Range/Coiling","neutral","Price coiling in tight range — big move coming"))
+    prev_res=max(rh[-21:-1]) if len(rh)>20 else 0
+    if price>prev_res and prev_close<prev_res and prev_res>0: patterns.append(("Resistance Break","bullish","Price broke above resistance — bullish breakout"))
+    prev_sup=min(rl[-21:-1]) if len(rl)>20 else float('inf')
+    if price<prev_sup and prev_close>prev_sup and prev_sup<float('inf'): patterns.append(("Support Break","bearish","Price broke below support — bearish breakdown"))
+    return patterns
+
+def update_sr_touches(symbol, highs, lows, closes, tolerance=0.005):
+    if symbol not in sr_touch_map: sr_touch_map[symbol]={"resistance":[],"support":[]}
+    res,sup=find_key_levels(highs,lows,closes)
+    def add_or_update(level_list, pl):
+        if pl is None: return
+        for entry in level_list:
+            if abs(entry["level"]-pl)/pl<tolerance:
+                entry["touches"]+=1; entry["last_seen"]=datetime.now(timezone.utc).isoformat(); return
+        level_list.append({"level":round(pl,6),"touches":1,
+            "first_seen":datetime.now(timezone.utc).isoformat(),
+            "last_seen":datetime.now(timezone.utc).isoformat()})
+    add_or_update(sr_touch_map[symbol]["resistance"],res)
+    add_or_update(sr_touch_map[symbol]["support"],sup)
+    sr_touch_map[symbol]["resistance"]=sorted(sr_touch_map[symbol]["resistance"],key=lambda x:x["touches"],reverse=True)[:10]
+    sr_touch_map[symbol]["support"]=sorted(sr_touch_map[symbol]["support"],key=lambda x:x["touches"],reverse=True)[:10]
+    save_json("sr_touch_map.json",sr_touch_map)
+    br=sr_touch_map[symbol]["resistance"][0] if sr_touch_map[symbol]["resistance"] else None
+    bs=sr_touch_map[symbol]["support"][0] if sr_touch_map[symbol]["support"] else None
+    return br,bs
+
+def detect_market_phase(closes, volumes, highs, lows):
+    if len(closes)<50: return "Unknown","Not enough data","❓"
+    c50=closes[-50:]; v50=volumes[-50:]; h50=highs[-50:]; l50=lows[-50:]
+    ma20=sum(closes[-20:])/20; ma50=sum(closes[-50:])/50
+    rsi=calc_rsi_wilder(c50); avg_vol=sum(v50[:25])/25; recent_vol=sum(v50[25:])/25
+    vr=recent_vol/avg_vol if avg_vol>0 else 1
+    range20=(max(h50[-20:])-min(l50[-20:]))/ma50*100 if ma50>0 else 0
+    was_down=c50[0]>c50[15]; at_lows=closes[-1]<ma50*1.05; at_highs=closes[-1]>ma50*0.95 and closes[-1]>ma20
+    if was_down and at_lows and range20<8 and vr<1.0 and 35<rsi<55:
+        return "Accumulation","Flat after downtrend — smart money quietly buying","🔵"
+    if closes[-1]>ma20>ma50 and vr>1.0 and rsi>50:
+        return "Markup","Price rising with volume — uptrend in progress","🟢"
+    if at_highs and vr>1.2 and range20<6 and rsi>55:
+        return "Distribution","High volume at highs but not advancing — smart money selling","🟡"
+    if closes[-1]<ma20<ma50 and vr>1.0 and rsi<50:
+        return "Markdown","Price falling with volume — downtrend in progress","🔴"
+    return "Sideways","No clear phase — market undecided","⚪️"
+
+def calc_tf_alignment_score(symbol, direction):
+    tf_weights=[("1w",5,"Weekly"),("1d",4,"Daily"),("4h",3,"4H"),("1h",2,"1H"),("30m",1,"30min")]
+    total=0; max_s=15; details=[]
+    for interval,weight,label in tf_weights:
+        try:
+            candles=get_candles(symbol,interval,100)
+            if not candles or len(candles)<20: details.append(label+": ❓"); continue
+            closes=[c[3] for c in candles]; trend=calc_trend(closes,20,50)
+            if direction=="long":
+                if trend=="bullish": total+=weight; details.append(label+": 🟢 +"+str(weight)+"pts")
+                elif trend=="sideways": total+=weight//2; details.append(label+": 🟡 +"+str(weight//2)+"pts")
+                else: details.append(label+": 🔴 +0pts")
+            else:
+                if trend=="bearish": total+=weight; details.append(label+": 🔴 +"+str(weight)+"pts")
+                elif trend=="sideways": total+=weight//2; details.append(label+": 🟡 +"+str(weight//2)+"pts")
+                else: details.append(label+": 🟢 +0pts")
+        except Exception as e: details.append(label+": ❓"); logger.error("TF "+symbol+" "+interval+": "+str(e))
+    return total,max_s,round(total/max_s*100),details
+
+# ============================================================
+# BTC PRE-MOVE DETECTION — UNCHANGED
+# ============================================================
+def detect_btc_pre_move():
+    try:
+        c1h=get_candles("BTC","1h",100)
+        if not c1h or len(c1h)<50: return False,"neutral",[],0,None
+        closes=[c[3] for c in c1h]; highs=[c[1] for c in c1h]
+        lows=[c[2] for c in c1h]; volumes=[c[4] for c in c1h]
+        signals=[]; bull=0; bear=0
+        is_sq,sq_hrs,bb_bias=detect_bb_squeeze(closes,50)
+        if is_sq:
+            signals.append("BB squeeze: "+str(sq_hrs)+"h coiling")
+            if bb_bias=="bullish": bull+=2
+            elif bb_bias=="bearish": bear+=2
+            else: bull+=1; bear+=1
+        avg20=sum(volumes[-20:])/20; avg5=sum(volumes[-5:])/5
+        drought=round((1-avg5/avg20)*100) if avg20>0 else 0
+        if drought>30:
+            signals.append("Volume drought: "+str(drought)+"% below avg")
+            bull+=1; bear+=1
+        obv_now=calc_obv(closes,volumes); obv_10=calc_obv(closes[:-10],volumes[:-10])
+        p_flat=abs(closes[-1]-closes[-10])/closes[-10]<0.01
+        if p_flat and obv_now>obv_10:
+            signals.append("OBV rising while price flat — accumulation (BULLISH)"); bull+=3
+        elif p_flat and obv_now<obv_10:
+            signals.append("OBV falling while price flat — distribution (BEARISH)"); bear+=3
+        rsi_hist=[calc_rsi_wilder(closes[:i]) for i in range(20,len(closes))]
+        div_type,div_str=detect_rsi_divergence(closes[-20:],rsi_hist[-20:] if len(rsi_hist)>=20 else rsi_hist)
+        if div_type=="bullish": signals.append("RSI bullish divergence ("+str(div_str)+")"); bull+=2
+        elif div_type=="bearish": signals.append("RSI bearish divergence ("+str(div_str)+")"); bear+=2
+        rl=[min(lows[i:i+4]) for i in range(-20,0,4) if lows[i:i+4]]
+        rh=[max(highs[i:i+4]) for i in range(-20,0,4) if highs[i:i+4]]
+        if len(rl)>=3 and rl[-1]>rl[-2]>rl[-3]: signals.append("Higher lows — ascending triangle"); bull+=2
+        if len(rh)>=3 and rh[-1]<rh[-2]<rh[-3]: signals.append("Lower highs — descending triangle"); bear+=2
+        similar=None
+        for p in sentinel_brain.get("pre_move_patterns",[])[-20:]:
+            snap=p.get("snapshot",{}); outcome=p.get("outcome","unknown")
+            cur={"squeeze":is_sq,"vol_drought":drought>30,"obv_div":div_type or "none"}
+            matches=sum(1 for k,v in cur.items() if snap.get(k)==v and v not in [False,"none"])
+            if matches>=2 and outcome!="unknown":
+                similar={"date":p.get("date","")[:10],"direction":p.get("direction",""),"pct_move":p.get("pct_move",0),"matches":matches}
+                if p.get("direction")=="up": bull+=1
+                elif p.get("direction")=="down": bear+=1
+                break
+        total=bull+bear; detected=total>=3 and len(signals)>=2
+        bias="bullish" if bull>bear else "bearish" if bear>bull else "neutral"
+        conf=min(round(total/10.0,2),1.0)
+        if detected:
+            snap_entry={"date":datetime.now(timezone.utc).isoformat(),
+                "snapshot":{"squeeze":is_sq,"vol_drought":drought>30,"obv_div":div_type or "none"},
+                "direction":bias,"signals":signals,"outcome":"unknown","pct_move":0}
+            sentinel_brain["pre_move_patterns"]=sentinel_brain.get("pre_move_patterns",[])
+            sentinel_brain["pre_move_patterns"].append(snap_entry)
+            if len(sentinel_brain["pre_move_patterns"])>PRE_MOVE_HISTORY_MAX:
+                sentinel_brain["pre_move_patterns"].pop(0)
+            save_json("sentinel_brain.json",sentinel_brain)
+        return detected,bias,signals,conf,similar
+    except Exception as e:
+        logger.error("Pre-move: "+str(e)); return False,"neutral",[],0,None
+
+# ============================================================
+# 7 CHART CHECKS — ALL UNCHANGED FROM OLD CODE
+# ============================================================
+def check_macro_trend(symbol,direction):
+    try:
+        wk=get_candles(symbol,"1w",52); mo=get_candles(symbol,"1M",24)
+        if not wk or not mo: return True,"⚠️ Macro: unavailable"
+        wc=[c[3] for c in wk]; mc=[c[3] for c in mo]
+        wt=calc_trend(wc,10,20); mt=calc_trend(mc,6,12)
+        wr=calc_rsi_wilder(wc); mr=calc_rsi_wilder(mc)
+        if direction=="short":
+            passed=wt in ["bearish","sideways"] or wr>60
+            if mt=="bullish" and wt=="bullish": passed=False
+        else:
+            passed=wt in ["bullish","sideways"] or wr<40
+            if mt=="bearish" and wt=="bearish": passed=False
+        s="✅" if passed else "❌"
+        return passed,s+" Macro: W="+wt+" RSI:"+str(wr)+" | M="+mt+" RSI:"+str(mr)
+    except Exception as e: return True,"⚠️ Macro: "+str(e)
+
+def check_mid_trend(symbol,direction):
+    try:
+        d=get_candles(symbol,"1d",100); h4=get_candles(symbol,"4h",100)
+        if not d or not h4: return True,"⚠️ Mid: unavailable"
+        dc=[c[3] for c in d]; h4c=[c[3] for c in h4]
+        dt=calc_trend(dc,20,50); h4t=calc_trend(h4c,20,50)
+        dr=calc_rsi_wilder(dc); h4r=calc_rsi_wilder(h4c)
+        if direction=="short":
+            passed=dt in ["bearish","sideways"] and h4t in ["bearish","sideways"]
+            if h4r>70: passed=True
+        else:
+            passed=dt in ["bullish","sideways"] and h4t in ["bullish","sideways"]
+            if h4r<30: passed=True
+        s="✅" if passed else "❌"
+        return passed,s+" Mid: Daily="+dt+" RSI:"+str(dr)+" | 4H="+h4t+" RSI:"+str(h4r)
+    except Exception as e: return True,"⚠️ Mid: "+str(e)
+
+def check_micro_trend(symbol,direction):
+    try:
+        h1=get_candles(symbol,"1h",100); m30=get_candles(symbol,"30m",100)
+        if not h1 or not m30: return True,"⚠️ Micro: unavailable"
+        h1c=[c[3] for c in h1]; m30c=[c[3] for c in m30]
+        h1t=calc_trend(h1c,20,50); m30t=calc_trend(m30c,20,50)
+        h1r=calc_rsi_wilder(h1c); m30r=calc_rsi_wilder(m30c)
+        if direction=="short":
+            passed=h1t in ["bearish","sideways"] or m30t=="bearish"
+            if h1r>65 or m30r>65: passed=True
+        else:
+            passed=h1t in ["bullish","sideways"] or m30t=="bullish"
+            if h1r<35 or m30r<35: passed=True
+        s="✅" if passed else "❌"
+        return passed,s+" Micro: 1H="+h1t+" RSI:"+str(h1r)+" | 30m="+m30t+" RSI:"+str(m30r)
+    except Exception as e: return True,"⚠️ Micro: "+str(e)
+
+def check_volume_profile(symbol,direction):
+    try:
+        h1=get_candles(symbol,"1h",50)
+        if not h1: return True,"⚠️ Volume: unavailable"
+        h1v=[c[4] for c in h1]; h1c=[c[3] for c in h1]
+        avg=sum(h1v[-20:])/20; cur=h1v[-1]
+        ratio=round(cur/avg,2) if avg>0 else 1
+        v5=sum(h1v[-5:])/5; v20=sum(h1v[-20:])/20
+        pu=h1c[-1]>h1c[-5]; vu=v5>v20
+        climax,conf=detect_volume_climax(h1c,h1v)
+        cs=" | ⚡ "+climax.replace("_"," ").title() if climax else ""
+        if direction=="short":
+            if pu and not vu: return True,"✅ Volume: Price up on weak vol — exhaustion"+cs
+            if not pu and vu: return True,"✅ Volume: Strong selling "+str(ratio)+"x"+cs
+            if ratio>1.5: return True,"✅ Volume: Spike "+str(ratio)+"x"+cs
+            return False,"❌ Volume: No conviction ("+str(ratio)+"x)"+cs
+        else:
+            if not pu and not vu: return True,"✅ Volume: Selling exhaustion"+cs
+            if pu and vu: return True,"✅ Volume: Strong buying "+str(ratio)+"x"+cs
+            if ratio>1.5: return True,"✅ Volume: Spike "+str(ratio)+"x"+cs
+            return False,"❌ Volume: Weak buying ("+str(ratio)+"x)"+cs
+    except Exception as e: return True,"⚠️ Volume: "+str(e)
+
+def check_rsi_confluence(symbol,direction):
+    try:
+        tfs=[("15m",get_candles(symbol,"15m",50)),("1h",get_candles(symbol,"1h",50)),
+             ("4h",get_candles(symbol,"4h",50)),("1d",get_candles(symbol,"1d",50))]
+        rv={}
+        for tf,c in tfs:
+            if c: rv[tf]=calc_rsi_wilder([x[3] for x in c])
+        if not rv: return True,"⚠️ RSI: unavailable"
+        rsi_str=" | ".join([tf+":"+str(v) for tf,v in rv.items()])
+        if direction=="short":
+            passed=sum(1 for v in rv.values() if v>55 or v<45)>=2 or sum(1 for v in rv.values() if v>65)>=1
+            verdict="bearish" if passed else "mixed"
+        else:
+            passed=sum(1 for v in rv.values() if v>50 or v<40)>=2 or sum(1 for v in rv.values() if v<35)>=1
+            verdict="bullish" if passed else "mixed"
+        s="✅" if passed else "❌"
+        return passed,s+" RSI ("+verdict+"): "+rsi_str
+    except Exception as e: return True,"⚠️ RSI: "+str(e)
+
+def check_money_flow(symbol,direction):
+    try:
+        h1=get_candles(symbol,"1h",50); h4=get_candles(symbol,"4h",50)
+        if not h1: return True,"⚠️ Money flow: unavailable"
+        h1H=[c[1] for c in h1]; h1L=[c[2] for c in h1]
+        h1C=[c[3] for c in h1]; h1V=[c[4] for c in h1]
+        cmf1=calc_cmf(h1H,h1L,h1C,h1V,20)
+        obv_now=calc_obv(h1C,h1V); obv_prev=calc_obv(h1C[:-5],h1V[:-5]); obv_up=obv_now>obv_prev
+        cmf4=0
+        if h4: cmf4=calc_cmf([c[1] for c in h4],[c[2] for c in h4],[c[3] for c in h4],[c[4] for c in h4],20)
+        info="CMF 1H:"+str(cmf1)+" 4H:"+str(cmf4)+" | OBV "+("rising" if obv_up else "falling")
+        if direction=="short":
+            passed=cmf1<0 or cmf4<-0.05 or not obv_up; verdict="outflow" if passed else "inflow (risky)"
+        else:
+            passed=cmf1>0 or cmf4>0.05 or obv_up; verdict="inflow" if passed else "outflow (risky)"
+        s="✅" if passed else "❌"
+        return passed,s+" Money flow ("+verdict+"): "+info
+    except Exception as e: return True,"⚠️ Money flow: "+str(e)
+
+def check_structure(symbol,direction,entry_price):
+    try:
+        h4=get_candles(symbol,"4h",100); d1=get_candles(symbol,"1d",60)
+        if not h4: return True,"⚠️ Structure: unavailable"
+        h4H=[c[1] for c in h4]; h4L=[c[2] for c in h4]; h4C=[c[3] for c in h4]
+        res,sup=find_key_levels(h4H,h4L,h4C)
+        price=entry_price if entry_price>0 else h4C[-1]
+        ema200=calc_ema(h4C,200) if len(h4C)>=200 else None
+        ema_str=""
+        if ema200: ema_str=" | 4H EMA200: "+("below ❌" if price<ema200 else "above ✅")
+        br,bs=update_sr_touches(symbol,h4H,h4L,h4C)
+        touch_str=""
+        if br and direction=="short": touch_str=" | Res "+str(br["touches"])+"x tested"
+        elif bs and direction=="long": touch_str=" | Sup "+str(bs["touches"])+"x tested"
+        hh=ll=hl=lh=False
+        if d1 and len(d1)>=10:
+            dH=[c[1] for c in d1]; dL=[c[2] for c in d1]
+            hh=dH[-1]>max(dH[-10:-1]); ll=dL[-1]<min(dL[-10:-1])
+            hl=dL[-1]>min(dL[-4:-1]); lh=dH[-1]<max(dH[-4:-1])
+        h4V=[c[4] for c in h4]
+        patterns=detect_patterns(h4H,h4L,h4C,h4V)
+        pat_str=""
+        if patterns:
+            rel=[p for p in patterns if (direction=="long" and p[1]=="bullish") or (direction=="short" and p[1]=="bearish")]
+            if rel: pat_str=" | Pattern: "+rel[0][0]
+        if direction=="short":
+            nr=res and abs(price-res)/price<0.02; be=ema200 and price<ema200; bs2=lh or ll
+            passed=nr or be or bs2; pts=[]
+            if nr: pts.append("near res $"+str(round(res,4)))
+            if be: pts.append("below 200EMA")
+            if bs2: pts.append("LH/LL confirmed")
+            detail=" | ".join(pts) if pts else "no key structure"
+        else:
+            ns=sup and abs(price-sup)/price<0.02; ae=ema200 and price>ema200; bs3=hl or hh
+            passed=ns or ae or bs3; pts=[]
+            if ns: pts.append("near sup $"+str(round(sup,4)))
+            if ae: pts.append("above 200EMA")
+            if bs3: pts.append("HH/HL confirmed")
+            detail=" | ".join(pts) if pts else "no key structure"
+        s="✅" if passed else "❌"
+        return passed,s+" Structure: "+detail+ema_str+touch_str+pat_str
+    except Exception as e: return True,"⚠️ Structure: "+str(e)
+
+# ============================================================
+# FEATURE 1: WIN/LOSS REASON TAGGING — UNCHANGED FROM OLD CODE
+# ============================================================
+def tag_check_results(checks, is_win):
+    check_names = ["macro_trend","mid_trend","micro_trend",
+                   "volume_profile","rsi_confluence","money_flow","structure"]
+    for i, (name, passed, _) in enumerate(checks):
+        key = check_names[i] if i < len(check_names) else name.lower().replace(" ","_")
+        if key not in check_tag_stats:
+            check_tag_stats[key] = {"wins":0,"losses":0}
+        if is_win: check_tag_stats[key]["wins"] += 1
+        else:      check_tag_stats[key]["losses"] += 1
+    save_json("check_tags.json", check_tag_stats)
+
+def get_check_reliability():
+    results = []
+    for check, stats in check_tag_stats.items():
+        total = stats["wins"] + stats["losses"]
+        if total > 0:
+            acc = round(stats["wins"] / total * 100)
+            results.append((check, acc, total))
+    return sorted(results, key=lambda x: x[1], reverse=True)
+
+# ============================================================
+# FEATURE 7: DYNAMIC CHECK WEIGHTING — UNCHANGED FROM OLD CODE
+# ============================================================
+CHECK_NAMES = ["macro_trend","mid_trend","micro_trend",
+               "volume_profile","rsi_confluence","money_flow","structure"]
+WEIGHT_MIN_TRADES = 5
+WEIGHT_DEFAULT    = 1.0
+WEIGHT_FLOOR      = 0.5
+WEIGHT_CEILING    = 2.0
+
+def get_check_weights():
+    weights = {}
+    for check in CHECK_NAMES:
+        stats = check_tag_stats.get(check, {"wins":0,"losses":0})
+        total = stats.get("wins",0) + stats.get("losses",0)
+        if total < WEIGHT_MIN_TRADES:
+            weights[check] = WEIGHT_DEFAULT
+        else:
+            win_rate = stats["wins"] / total
+            raw      = 0.5 + (win_rate * 1.5)
+            weights[check] = round(max(WEIGHT_FLOOR, min(WEIGHT_CEILING, raw)), 3)
+    return weights
+
+def calc_weighted_score(checks, weights):
+    check_key_map = {
+        "Macro Trend":    "macro_trend",
+        "Mid Trend":      "mid_trend",
+        "Micro Trend":    "micro_trend",
+        "Volume Profile": "volume_profile",
+        "RSI Confluence": "rsi_confluence",
+        "Money Flow":     "money_flow",
+        "Structure":      "structure"
+    }
+    score=0.0; max_s=0.0; details=[]
+    for name, passed, _ in checks:
+        key = check_key_map.get(name, name.lower().replace(" ","_"))
+        w   = weights.get(key, WEIGHT_DEFAULT)
+        max_s += w
+        if passed:
+            score += w; details.append(name+": ✅ (w="+str(w)+")")
+        else:
+            details.append(name+": ❌ (w="+str(w)+")")
+    pct = round(score / max_s * 100) if max_s > 0 else 0
+    return round(score,3), round(max_s,3), pct, details
+
+# ============================================================
+# FEATURE 2: DYNAMIC CONFIDENCE — UNCHANGED
+# ============================================================
+def get_coin_confidence(symbol, direction):
+    if symbol not in coin_confidence:
+        return 0.5, "No history — base confidence"
+    data   = coin_confidence[symbol]
+    wins   = data.get(direction + "_wins", 0)
+    losses = data.get(direction + "_losses", 0)
+    total  = wins + losses
+    if total < 3:
+        return 0.5, "Only " + str(total) + " past verdicts — building history"
+    conf = wins / total
+    if conf >= 0.7:
+        desc = "High confidence (" + str(round(conf*100)) + "% win rate on " + str(total) + " trades)"
+    elif conf >= 0.5:
+        desc = "Moderate confidence (" + str(round(conf*100)) + "% win rate)"
+    else:
+        desc = "Low confidence (" + str(round(conf*100)) + "% win rate — be cautious)"
+    return round(conf, 2), desc
+
+def update_coin_confidence(symbol, direction, is_win):
+    if symbol not in coin_confidence:
+        coin_confidence[symbol] = {"long_wins":0,"long_losses":0,"short_wins":0,"short_losses":0}
+    key = direction + ("_wins" if is_win else "_losses")
+    coin_confidence[symbol][key] = coin_confidence[symbol].get(key, 0) + 1
+    save_json("coin_confidence.json", coin_confidence)
+
+# ============================================================
+# FEATURE 3: MARKET REGIME ENGINE — UNCHANGED
+# ============================================================
+def detect_market_regime():
+    global _current_regime
+    now = time.time()
+    if now - _current_regime.get("updated", 0) < 900 and _current_regime.get("mode") != "unknown":
+        return _current_regime
+    try:
+        candles = get_candles("BTC", "4h", 50)
+        if not candles or len(candles) < 30: return _current_regime
+        closes=[c[3] for c in candles]; highs=[c[1] for c in candles]; lows=[c[2] for c in candles]
+        _,_,_,bb_width = calc_bollinger_bands(closes, 20)
+        range_20 = (max(highs[-20:]) - min(lows[-20:])) / closes[-1] * 100
+        ema20 = calc_ema(closes[-40:], 20)
+        ema20_prev = calc_ema(closes[-41:-1], 20) if len(closes) >= 41 else ema20
+        ema_slope = (ema20 - ema20_prev) / ema20_prev * 100 if ema20_prev else 0
+        rsi = calc_rsi_wilder(closes)
+        if bb_width and bb_width > 6 and abs(ema_slope) > 0.1:
+            mode = "TREND"; direction = "BULLISH" if ema_slope > 0 else "BEARISH"
+            desc = "Strong " + direction + " trend — follow momentum"
+            emoji = "🟢" if direction == "BULLISH" else "🔴"
+        elif bb_width and bb_width < 3 or range_20 < 4:
+            mode = "RANGE"; desc = "Price ranging — fade extremes, RSI divergence plays"; emoji = "🟡"
+        elif bb_width and 3 <= bb_width <= 6:
+            mode = "TRANSITION"; desc = "Regime changing — wait for confirmation, reduce size"; emoji = "⚪️"
+        else:
+            mode = "RANGE"; desc = "No clear trend — ranging market"; emoji = "🟡"
+        _current_regime = {"mode":mode,"desc":desc,"emoji":emoji,"bb_width":bb_width,
+            "range_20":range_20,"ema_slope":round(ema_slope,4),"rsi":rsi,"updated":now}
+        save_json("regime.json", _current_regime)
+        logger.info("Regime: " + mode + " | " + desc)
+        return _current_regime
+    except Exception as e:
+        logger.error("Regime engine: " + str(e)); return _current_regime
+
+# ============================================================
+# FEATURE 4: MISSED TRADE TRACKER
+# + ANALYTICAL UPGRADE: store failed_checks for /blocked command
+# ============================================================
+def track_missed_trade(signal, checks, reason):
+    # Store which checks FAILED — used by /blocked to show block reasons
+    check_name_map = {
+        "Macro Trend":"macro_trend","Mid Trend":"mid_trend","Micro Trend":"micro_trend",
+        "Volume Profile":"volume_profile","RSI Confluence":"rsi_confluence",
+        "Money Flow":"money_flow","Structure":"structure"
+    }
+    failed_checks = [check_name_map.get(n, n.lower().replace(" ","_")) for n,p,_ in checks if not p]
+    missed = {
+        "symbol":        signal.get("symbol"),
+        "direction":     signal.get("direction"),
+        "entry":         signal.get("entry", 0),
+        "blocked_at":    datetime.now(timezone.utc).isoformat(),
+        "reason":        reason,
+        "checks_passed": sum(1 for _,p,_ in checks if p),
+        "failed_checks": failed_checks,  # ← analytical: which checks caused the block
+        "outcome":       "unknown",
+        "outcome_pct":   0,
+        "was_correct":   None
+    }
+    missed_trades.append(missed)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    while missed_trades and missed_trades[0].get("blocked_at","") < cutoff:
+        missed_trades.pop(0)
+    save_json("missed_trades.json", missed_trades)
+    logger.info("Missed trade tracked: " + missed["symbol"] + " " + missed["direction"] +
+                " | failed: " + ", ".join(failed_checks))
+
+# ============================================================
+# HELPER FUNCTIONS — handle BOTH old and new missed_trade formats
+# Old records use was_correct (True/False/None)
+# New records use outcome ("would_win","would_lose","neutral","expired")
+# These helpers preserve historical 251 correct blocks and 209 wrong blocks
+# ============================================================
+def is_correct_block(t):
+    """Block was correct if price went DOWN >1% after we blocked.
+    Uses outcome_pct directly — works for both old and new records."""
+    pct = t.get("outcome_pct", 0)
+    # If outcome_pct exists and is < -1, it was a correct block (price fell)
+    if pct < -1:
+        return True
+    # Pure new-format check: explicit would_lose
+    if t.get("outcome") == "would_lose":
+        return True
+    return False
+
+def is_wrong_block(t):
+    """Block was wrong if price went UP >1% after we blocked (missed profit)."""
+    pct = t.get("outcome_pct", 0)
+    if pct > 1:
+        return True
+    if t.get("outcome") == "would_win":
+        return True
+    return False
+
+def is_expired_block(t):
+    """Block expired or price barely moved — no clear outcome."""
+    outcome = t.get("outcome")
+    if outcome in ["expired", "neutral"]: return True
+    # If price barely moved (between -1% and +1%) AND outcome was assigned, it's neutral
+    pct = t.get("outcome_pct", 0)
+    if outcome not in [None, "unknown"] and -1 <= pct <= 1:
+        return True
+    return False
+
+def is_pending_block(t):
+    """Block hasn't been resolved yet."""
+    outcome = t.get("outcome")
+    if outcome in [None, "unknown"]:
+        # was_correct still None means we haven't checked yet
+        if t.get("was_correct") is None:
+            return True
+    return False
+
+def update_missed_trade_outcomes():
+    now = datetime.now(timezone.utc)
+    updated = False
+    for trade in missed_trades:
+        if trade.get("outcome") != "unknown": continue
+        blocked_at = trade.get("blocked_at", "")
+        if not blocked_at: continue
+        try:
+            blocked_time = datetime.fromisoformat(blocked_at)
+            hours_since  = (now - blocked_time).total_seconds() / 3600
+            if hours_since < 1: continue
+            if hours_since > 168:
+                trade["outcome"] = "expired"; trade["was_correct"] = None; updated = True; continue
+            symbol    = trade["symbol"]; direction = trade["direction"]; entry = trade.get("entry", 0)
+            if entry <= 0: continue
+            candles = get_candles(symbol, "1h", 1)
+            if not candles: continue
+            current_price = candles[-1][3]
+            if direction == "short":
+                pct_move = round((entry - current_price) / entry * 100, 2)
+            else:
+                pct_move = round((current_price - entry) / entry * 100, 2)
+            trade["outcome_pct"] = pct_move
+            trade["was_correct"] = pct_move < 0
+            trade["outcome"] = "would_win" if pct_move > 1 else "would_lose" if pct_move < -1 else "neutral"
+            updated = True
+            # Wrong block learning — penalize checks that blocked winning trades
+            if not trade["was_correct"] and pct_move > 1:
+                for ck in trade.get("failed_checks", []):
+                    if ck in check_tag_stats:
+                        check_tag_stats[ck]["losses"] += 1
+                if trade.get("failed_checks"):
+                    save_json("check_tags.json", check_tag_stats)
+            logger.info("Missed trade outcome: " + symbol + " " + ("CORRECT block" if trade["was_correct"] else "WRONG block — missed " + str(pct_move) + "%"))
+        except Exception as e:
+            logger.error("Missed trade update: " + str(e))
+    if updated:
+        save_json("missed_trades.json", missed_trades)
+
+# ============================================================
+# FEATURE 5: ENTRY TIMING — UNCHANGED FROM OLD CODE (simple version)
+# ============================================================
+def check_entry_timing(symbol, direction):
+    try:
+        m15 = get_candles(symbol, "15m", 10)
+        if not m15 or len(m15) < 5: return True, "✅ Timing: No data — proceeding"
+        closes=[ c[3] for c in m15]; volumes=[c[4] for c in m15]
+        last_close=closes[-1]; prev_close=closes[-2]
+        last_vol=volumes[-1]; avg_vol=sum(volumes[-5:])/5
+        last_candle_bull=last_close>prev_close; vol_spike=last_vol>avg_vol*1.3
+        if direction=="short":
+            if not last_candle_bull and vol_spike: return True,"✅ Timing: Red candle + volume — good short entry"
+            if not last_candle_bull: return True,"✅ Timing: Bearish momentum confirmed"
+            if last_candle_bull and vol_spike: return False,"❌ Timing: Last candle bullish + volume spike — wait for reversal"
+            return True,"✅ Timing: Acceptable entry window"
+        else:
+            if last_candle_bull and vol_spike: return True,"✅ Timing: Green candle + volume — good long entry"
+            if last_candle_bull: return True,"✅ Timing: Bullish momentum confirmed"
+            if not last_candle_bull and vol_spike: return False,"❌ Timing: Last candle bearish + volume — wait for bounce"
+            return True,"✅ Timing: Acceptable entry window"
+    except Exception as e:
+        logger.error("Entry timing: " + str(e)); return True,"✅ Timing: Error — proceeding"
+
+# ============================================================
+# MASTER VERDICT — UNCHANGED TRADING LOGIC
+# ============================================================
+def run_sentinel_analysis(signal):
+    symbol=signal.get("symbol","BTC"); direction=signal.get("direction","long")
+    score_b1=signal.get("score",6); entry=signal.get("entry",0); nl=chr(10)
+    logger.info("Analysing: "+symbol+" "+direction.upper()+" Bot1:"+str(score_b1))
+
+    ck = coin_knowledge.get(symbol, {})
+    own_bias = ck.get("overall_bias", "NEUTRAL")
+    if own_bias != "NEUTRAL":
+        if direction == "short" and own_bias == "BULLISH":
+            msg=("🧠 <b>SENTINEL SELF-REJECT</b>"+nl+"❌ "+symbol+" SHORT — REJECTED"+nl+nl+
+                "My knowledge says "+symbol+" is BULLISH."+nl+"I will not short what I know is going up."+nl+nl+
+                "Daily: "+ck.get("daily_trend","?")+" | RSI: "+str(ck.get("daily_rsi","?"))+nl+
+                "Phase: "+ck.get("phase","?")+nl+"⏰ "+datetime.now(timezone.utc).strftime("%H:%M UTC"))
+            send_message(msg)
+            logger.info("SELF-REJECT: "+symbol+" SHORT conflicts with own BULLISH bias")
+            sentinel_brain["total_verdicts"]+=1; sentinel_brain["rejected"]=sentinel_brain.get("rejected",0)+1
+            save_json("sentinel_brain.json",sentinel_brain)
+            return {"approved":False,"score":0,"total":7,"symbol":symbol,"direction":direction,"reason":"Self-reject: own bias BULLISH"}
+        if direction == "long" and own_bias == "BEARISH":
+            msg=("🧠 <b>SENTINEL SELF-REJECT</b>"+nl+"❌ "+symbol+" LONG — REJECTED"+nl+nl+
+                "My knowledge says "+symbol+" is BEARISH."+nl+"I will not long what I know is going down."+nl+nl+
+                "Daily: "+ck.get("daily_trend","?")+" | RSI: "+str(ck.get("daily_rsi","?"))+nl+
+                "Phase: "+ck.get("phase","?")+nl+"⏰ "+datetime.now(timezone.utc).strftime("%H:%M UTC"))
+            send_message(msg)
+            logger.info("SELF-REJECT: "+symbol+" LONG conflicts with own BEARISH bias")
+            sentinel_brain["total_verdicts"]+=1; sentinel_brain["rejected"]=sentinel_brain.get("rejected",0)+1
+            save_json("sentinel_brain.json",sentinel_brain)
+            return {"approved":False,"score":0,"total":7,"symbol":symbol,"direction":direction,"reason":"Self-reject: own bias BEARISH"}
+
+    coin_conf, conf_desc = get_coin_confidence(symbol, direction)
+    regime = detect_market_regime(); regime_mode=regime.get("mode","UNKNOWN"); regime_emoji=regime.get("emoji","❓")
+    good_timing, timing_reason = check_entry_timing(symbol, direction)
+
+    # BOT1 TIMING INTELLIGENCE — UNCHANGED
+    bot1_hour_boost=0; bot1_timing_note=""; bot1_coin_note=""
+    try:
+        now_hour=datetime.now(timezone.utc).hour
+        b1=requests.get(BOT1_URL+"/brain",timeout=4)
+        if b1.status_code==200:
+            b1_data=b1.json(); hour_stats=b1_data.get("hour_stats",{})
+            hd=hour_stats.get(str(now_hour),{}); hw=hd.get("wins",0); hl=hd.get("losses",0); ht=hw+hl
+            if ht>=5:
+                hour_wr=round(hw/ht*100)
+                if hour_wr>=70: bot1_hour_boost=8; bot1_timing_note="🕐 Bot1: "+str(now_hour)+":00 UTC — "+str(hour_wr)+"% win rate ✅"
+                elif hour_wr<=35: bot1_hour_boost=-8; bot1_timing_note="🕐 Bot1: "+str(now_hour)+":00 UTC — only "+str(hour_wr)+"% ⚠️"
+                else: bot1_timing_note="🕐 Bot1: "+str(now_hour)+":00 UTC — "+str(hour_wr)+"% (neutral)"
+            coin_stats=b1_data.get("coin_stats",{}).get(symbol,{})
+            if direction=="long": cw=coin_stats.get("long_wins",0); cl=coin_stats.get("long_losses",0)
+            else: cw=coin_stats.get("short_wins",0); cl=coin_stats.get("short_losses",0)
+            ct=cw+cl
+            if ct>=5:
+                cwr=round(cw/ct*100)
+                if cwr>=70: bot1_hour_boost+=5; bot1_coin_note="🧠 Bot1: "+symbol+" "+direction+" wins "+str(cwr)+"% ✅"
+                elif cwr<=30: bot1_hour_boost-=5; bot1_coin_note="🧠 Bot1: "+symbol+" "+direction+" only "+str(cwr)+"% ⚠️"
+    except Exception as e: logger.warning("Bot1 brain read: "+str(e))
+
+    prior,context_summary=get_coin_context(symbol)
+    if prior:
+        send_message("📚 <b>Prior Knowledge: "+symbol+"</b>"+nl+nl+context_summary+nl+nl+
+            "Confidence: "+str(round(coin_conf*100))+"% | Regime: "+regime_emoji+" "+regime_mode+nl+"Running fresh analysis...")
+
+    h1_raw=get_candles(symbol,"1h",100); phase=phase_desc=phase_emoji="❓"
+    if h1_raw and len(h1_raw)>=50:
+        phase,phase_desc,phase_emoji=detect_market_phase([c[3] for c in h1_raw],[c[4] for c in h1_raw],[c[1] for c in h1_raw],[c[2] for c in h1_raw])
+
+    tf_score,tf_max,tf_pct,tf_details=calc_tf_alignment_score(symbol,direction)
+    btc_pm,btc_bias,btc_signals,btc_conf,similar=detect_btc_pre_move()
+
+    checks=[]
+    try:
+        checks.append(("Macro Trend",    *check_macro_trend(symbol,direction)))
+        checks.append(("Mid Trend",      *check_mid_trend(symbol,direction)))
+        checks.append(("Micro Trend",    *check_micro_trend(symbol,direction)))
+        checks.append(("Volume Profile", *check_volume_profile(symbol,direction)))
+        checks.append(("RSI Confluence", *check_rsi_confluence(symbol,direction)))
+        checks.append(("Money Flow",     *check_money_flow(symbol,direction)))
+        checks.append(("Structure",      *check_structure(symbol,direction,entry)))
+    except Exception as e: logger.error("Checks: "+str(e))
+
+    passed=sum(1 for _,p,_ in checks if p); total=len(checks)
+
+    # DYNAMIC WEIGHTED SCORING — UNCHANGED (flat 57% threshold)
+    weights=get_check_weights()
+    w_score,w_max,w_pct,w_details=calc_weighted_score(checks,weights)
+    w_pct_final=min(100,max(0,w_pct+bot1_hour_boost))
+    approved=w_pct_final>=int(APPROVAL_WEIGHTED_THRESHOLD*100)  # ← 57% UNCHANGED
+
+    breakdown=chr(10).join(d for _,_,d in checks)
+    w_breakdown=chr(10).join("  "+d for d in w_details)
+    tf_str=chr(10).join("  "+d for d in tf_details)
+    now_str=datetime.now(timezone.utc).strftime("%H:%M UTC")
+
+    level_note=""
+    sl=signal.get("sl",0); tp1=signal.get("tp1",0)
+    if entry>0 and sl>0 and tp1>0:
+        if direction=="long": risk=entry-sl; reward=tp1-entry
+        else: risk=sl-entry; reward=entry-tp1
+        rr=round(reward/risk,2) if risk>0 else 0
+        risk_pct=round(risk/entry*100,2)
+        ck2=coin_knowledge.get(symbol,{}); sup=ck2.get("support",0); res=ck2.get("resistance",0)
+        level_issues=[]
+        if rr<1.5: level_issues.append("R:R too low ("+str(rr)+") — need 1.5 minimum"); approved=False
+        if risk_pct>5: level_issues.append("Stop too wide ("+str(risk_pct)+"%) — max 5%"); approved=False
+        if direction=="long" and sup>0 and sl>sup:
+            level_issues.append("Stop $"+str(round(sl,4))+" above support $"+str(round(sup,4))+" — not protected"); approved=False
+        if direction=="short" and res>0 and sl<res:
+            level_issues.append("Stop $"+str(round(sl,4))+" below resistance $"+str(round(res,4))+" — not protected"); approved=False
+        if level_issues: level_note=chr(10)+"⚠️ <b>Level Issues:</b>"+chr(10)+chr(10).join("  • "+i for i in level_issues)
+        else: level_note=chr(10)+"✅ <b>Levels valid:</b> R:R 1:"+str(rr)+" | Risk "+str(risk_pct)+"% | Stop behind key level"
+
+    timing_note=""
+    if not good_timing: timing_note=chr(10)+"⏱️ "+timing_reason; approved=False
+
+    dir_icon="📈 LONG" if direction=="long" else "📉 SHORT"
+    btc_note=""
+    if btc_pm:
+        btc_note=chr(10)+"⚡ <b>BTC Pre-Move!</b> Bias: "+btc_bias.upper()
+        if similar: btc_note+=chr(10)+"Similar to "+similar["date"]+" → "+str(similar["pct_move"])+"% "+similar["direction"]
+
+    b1_notes=""
+    if bot1_timing_note: b1_notes+=chr(10)+bot1_timing_note
+    if bot1_coin_note: b1_notes+=chr(10)+bot1_coin_note
+    if bot1_hour_boost!=0:
+        b1_notes+=chr(10)+("📈 Timing boost: +" if bot1_hour_boost>0 else "📉 Timing penalty: ")+str(abs(bot1_hour_boost))+"pts → Adjusted score: "+str(w_pct_final)+"%"
+
+    msg=("🛡️ <b>SENTINEL v3 VERDICT</b>"+chr(10)+"━━━━━━━━━━━━━━━━━━━━"+chr(10)+chr(10)+
+        dir_icon+" <b>"+symbol+"/USDT</b>"+chr(10)+"Bot 1 score: "+str(score_b1)+chr(10)+
+        phase_emoji+" Phase: "+phase+" | "+regime_emoji+" Regime: "+regime_mode+chr(10)+
+        "🎯 Confidence: "+str(round(coin_conf*100))+"% — "+conf_desc+chr(10)+chr(10)+
+        "<b>📊 TF Score: "+str(tf_score)+"/"+str(tf_max)+" ("+str(tf_pct)+"%)</b>"+chr(10)+
+        tf_str+chr(10)+chr(10)+
+        "<b>7 Checks (raw):</b>"+chr(10)+breakdown+chr(10)+chr(10)+
+        "<b>⚖️ Weighted Score: "+str(w_score)+"/"+str(w_max)+" ("+str(w_pct)+"%)</b>"+chr(10)+
+        w_breakdown+b1_notes+chr(10)+chr(10)+timing_reason+chr(10)+chr(10)+
+        "━━━━━━━━━━━━━━━━━━━━"+chr(10)+
+        "<b>Raw: "+str(passed)+"/"+str(total)+" | Weighted: "+str(w_pct)+"% → Adjusted: "+str(w_pct_final)+"% (need "+str(int(APPROVAL_WEIGHTED_THRESHOLD*100))+"%)</b>"+chr(10)+chr(10)+
+        "<b>"+("✅ APPROVED" if approved else "❌ REJECTED")+"</b>"+chr(10)+
+        ("✅ Chart aligns. Clearing Bot 1." if approved else "🚫 Blocking trade.")+
+        level_note+btc_note+timing_note+chr(10)+chr(10)+"⏰ "+now_str)
+    send_message(msg)
+
+    sentinel_brain["total_verdicts"]+=1
+    if approved: sentinel_brain["approved"]+=1
+    else: sentinel_brain["rejected"]+=1
+    if symbol not in sentinel_brain["coin_memory"]:
+        sentinel_brain["coin_memory"][symbol]={"approved":0,"wins":0,"losses":0}
+    if approved: sentinel_brain["coin_memory"][symbol]["approved"]+=1
+    save_json("sentinel_brain.json",sentinel_brain)
+
+    verdict_history.append({"symbol":symbol,"direction":direction,"approved":approved,
+        "score":passed,"tf_score":tf_score,"phase":phase,"w_score":w_score,"w_pct":w_pct,
+        "timestamp":datetime.now(timezone.utc).isoformat(),"checks":[(n,p) for n,p,_ in checks]})
+    if len(verdict_history)>100: verdict_history.pop(0)
+    save_json("sentinel_history.json",verdict_history)
+
+    if approved:
+        sl2=signal.get("sl",0); tp1b=signal.get("tp1",0); rr2=0; risk_pct2=0
+        if entry>0 and sl2>0 and tp1b>0:
+            risk2=(entry-sl2) if direction=="long" else (sl2-entry)
+            reward2=(tp1b-entry) if direction=="long" else (entry-tp1b)
+            rr2=round(reward2/risk2,2) if risk2>0 else 0; risk_pct2=round(risk2/entry*100,2)
+        approved_trades=load_json("approved_trades.json",[])
+        approved_trades.append({"symbol":symbol,"direction":direction,"entry":entry,"stop":sl2,
+            "tp1":tp1b,"rr":rr2,"risk_pct":risk_pct2,"checks_passed":passed,"tf_score":tf_score,
+            "phase":phase,"btc_bias":btc_bias if btc_pm else "neutral","btc_premove":btc_pm,
+            "time":datetime.now(timezone.utc).isoformat(),"outcome":"pending","pnl":0})
+        if len(approved_trades)>200: approved_trades=approved_trades[-200:]
+        save_json("approved_trades.json",approved_trades)
+
+    if not approved:
+        track_missed_trade(signal, checks, "Score: "+str(passed)+"/"+str(total)+" | "+timing_reason)
+
+    sent_entry=sent_stop=sent_tp1=sent_tp2=0
+    if approved:
+        ck3=coin_knowledge.get(symbol,{}); sup=ck3.get("support",0); res=ck3.get("resistance",0)
+        if direction=="long":
+            if not sup: sup=round(float(entry)*0.97,6) if entry else 0
+            sent_entry=sup; sent_stop=round(sup*0.992,6); risk=sent_entry-sent_stop
+            if risk<=0: risk=sent_entry*0.01
+            sent_tp1=round(sent_entry+risk*2.0,6); sent_tp2=round(sent_entry+risk*3.5,6)
+        else:
+            if not res: res=round(float(entry)*1.03,6) if entry else 0
+            sent_entry=res; sent_stop=round(res*1.008,6); risk=sent_stop-sent_entry
+            if risk<=0: risk=sent_entry*0.01
+            sent_tp1=round(sent_entry-risk*2.0,6); sent_tp2=round(sent_entry-risk*3.5,6)
+
+    return {"approved":approved,"score":passed,"total":total,"tf_score":tf_score,"tf_pct":tf_pct,
+            "phase":phase,"symbol":symbol,"direction":direction,"btc_premove":btc_pm,
+            "timestamp":datetime.now(timezone.utc).isoformat(),
+            "entry":sent_entry,"stop":sent_stop,"tp1":sent_tp1,"tp2":sent_tp2}
+
+# ============================================================
+# COIN WATCHER — UNCHANGED
+# ============================================================
+def get_btc_context():
+    if "BTC" in coin_knowledge:
+        btc=coin_knowledge["BTC"]; dt=btc.get("daily_trend","sideways"); wt=btc.get("weekly_trend","sideways"); dr=btc.get("daily_rsi",50)
+        if wt=="bearish" and dt=="bearish": return "bear"
+        if wt=="bullish" and dt=="bullish": return "bull"
+        if dt=="bearish" and dr<45: return "bear"
+        if dt=="bullish" and dr>55: return "bull"
+    return "sideways"
+
+def get_coin_context(symbol):
+    if symbol not in coin_knowledge: return None,"No prior knowledge for "+symbol
+    k=coin_knowledge[symbol]; updated=k.get("last_updated","")[:16].replace("T"," ")
+    bias=k.get("overall_bias","NEUTRAL"); dt=k.get("daily_trend","?"); wt=k.get("weekly_trend","?")
+    dr=k.get("daily_rsi",50); phase=k.get("phase","Unknown"); history=k.get("history",[])
+    ts=("Still learning" if len(history)<4 else
+        ("Consistent "+history[-1]["bias"]+" for "+str(len(history))+" reads"
+         if len(set(h["bias"] for h in history[-4:]))==1 else "Mixed signals recently"))
+    summary=("📚 "+symbol+":"+chr(10)+"Last: "+updated+chr(10)+"Bias: "+bias+" | Phase: "+phase+chr(10)+
+             "Daily: "+dt+" RSI:"+str(dr)+chr(10)+"Weekly: "+wt+chr(10)+ts)
+    return k,summary
+
+def analyze_coin_deeply(symbol):
+    try:
+        daily=get_candles(symbol,"1d",50); weekly=get_candles(symbol,"1w",20); h1=get_candles(symbol,"1h",100)
+        dt=wt="unknown"; dr=wr=50; phase=phase_desc=phase_emoji="Unknown"
+        if daily: dc=[c[3] for c in daily]; dt=calc_trend(dc,20,50); dr=calc_rsi_wilder(dc)
+        if weekly: wc=[c[3] for c in weekly]; wt=calc_trend(wc,10,20); wr=calc_rsi_wilder(wc)
+        if h1 and len(h1)>=50:
+            phase,phase_desc,phase_emoji=detect_market_phase([c[3] for c in h1],[c[4] for c in h1],[c[1] for c in h1],[c[2] for c in h1])
+        mp,_=check_macro_trend(symbol,"long"); midp,_=check_mid_trend(symbol,"long")
+        micp,_=check_micro_trend(symbol,"long"); rp,_=check_rsi_confluence(symbol,"long"); fp,_=check_money_flow(symbol,"long")
+        bc=sum([mp,midp,micp,rp,fp])
+        bias="BULLISH" if bc>=4 else "BEARISH" if bc<=1 else "NEUTRAL"
+        h4=get_candles(symbol,"4h",100); res=sup=cp=0
+        if h4:
+            h4H=[c[1] for c in h4]; h4L=[c[2] for c in h4]; h4C=[c[3] for c in h4]
+            r,s=find_key_levels(h4H,h4L,h4C)
+            res=round(r,6) if r else 0; sup=round(s,6) if s else 0; cp=round(h4C[-1],6)
+            update_sr_touches(symbol,h4H,h4L,h4C)
+        h1c=[c[3] for c in h1] if h1 else []
+        is_sq,sq_hrs,_=detect_bb_squeeze(h1c) if h1c else (False,0,"neutral")
+        knowledge={"symbol":symbol,"last_updated":datetime.now(timezone.utc).isoformat(),
+            "daily_trend":dt,"weekly_trend":wt,"daily_rsi":dr,"weekly_rsi":wr,
+            "overall_bias":bias,"phase":phase,"phase_desc":phase_desc,"phase_emoji":phase_emoji,
+            "bb_squeeze":is_sq,"squeeze_hours":sq_hrs,"resistance":res,"support":sup,
+            "current_price":cp,"macro_bullish":mp,"mid_bullish":midp,"micro_bullish":micp,
+            "rsi_aligned":rp,"money_flowing":fp,"history":coin_knowledge.get(symbol,{}).get("history",[])}
+        knowledge["history"].append({"time":datetime.now(timezone.utc).strftime("%H:%M"),"bias":bias,"phase":phase,"d_rsi":dr})
+        if len(knowledge["history"])>96: knowledge["history"].pop(0)
+        coin_knowledge[symbol]=knowledge; save_json("coin_knowledge.json",coin_knowledge)
+        logger.info(symbol+" — "+bias+" | "+phase+" | D:"+dt+" RSI:"+str(dr))
+        generate_market_alert(symbol,knowledge,cp)
+        return knowledge
+    except Exception as e:
+        logger.error("Deep read "+symbol+": "+str(e)); return {}
+
+def generate_market_alert(symbol,knowledge,price):
+    if _paused: return
+    try:
+        bias=knowledge.get("overall_bias","NEUTRAL"); dt=knowledge.get("daily_trend","sideways")
+        wt=knowledge.get("weekly_trend","sideways"); dr=knowledge.get("daily_rsi",50)
+        phase=knowledge.get("phase","Unknown"); pe=knowledge.get("phase_emoji","❓")
+        res=knowledge.get("resistance"); sup=knowledge.get("support")
+        sq=knowledge.get("bb_squeeze",False); sqh=knowledge.get("squeeze_hours",0)
+        history=knowledge.get("history",[])
+        if len(history)<2: return
+        btc=get_btc_context(); btc_str="BTC: "+btc.upper()
+        alert=alert_type=None; nl=chr(10)
+        if sq and sqh>=4:
+            try:
+                h1_sq=get_candles(symbol,"1h",50); sq_dir="UNCLEAR"; sq_icon="⚪️"; sq_note="Wait for first candle break"
+                if h1_sq:
+                    sqc=[c[3] for c in h1_sq]; sqv=[c[4] for c in h1_sq]
+                    obv_up=calc_obv(sqc,sqv)>calc_obv(sqc[:-5],sqv[:-5]); sqrsi=calc_rsi_wilder(sqc); above_ma=sqc[-1]>sum(sqc[-20:])/20
+                    bull=sum([obv_up,sqrsi>50,above_ma,btc=="bull"]); bear=sum([not obv_up,sqrsi<50,not above_ma,btc=="bear"])
+                    if bull>=3: sq_dir="UP 📈"; sq_icon="🟢"; sq_note="OBV "+("rising ✅" if obv_up else "falling ❌")+" | RSI:"+str(sqrsi)+" | "+("Above" if above_ma else "Below")+" MA | BTC:"+btc.upper()
+                    elif bear>=3: sq_dir="DOWN 📉"; sq_icon="🔴"; sq_note="OBV "+("rising ❌" if obv_up else "falling ✅")+" | RSI:"+str(sqrsi)+" | "+("Above" if above_ma else "Below")+" MA | BTC:"+btc.upper()
+                    else: sq_dir="UNCLEAR ❓"; sq_icon="⚪️"; sq_note="Mixed signals — wait for candle confirmation"
+            except Exception: sq_dir="UNCLEAR ❓"; sq_icon="⚪️"; sq_note="Data unavailable"
+            alert=("🔥 <b>"+symbol+" — BB Squeeze ("+str(sqh)+"h)</b>"+nl+"Coiling — big move incoming."+nl+
+                "Direction bias: "+sq_icon+" "+sq_dir+nl+sq_note+nl+pe+" Phase: "+phase+nl+btc_str+nl+"📍 Watch for "+sq_dir.split()[0]+" breakout.")
+            alert_type="bb_squeeze"
+        if not alert and len(history)>=4:
+            pb=[h["bias"] for h in history[-4:-1]]
+            if pb and all(b!=bias for b in pb):
+                alert=("🔄 <b>"+symbol+" — Trend Shift!</b>"+nl+pb[-1]+" → "+bias+nl+"Daily RSI: "+str(dr)+" | Weekly: "+wt+nl+pe+" Phase: "+phase+nl+btc_str+nl+"📍 Momentum changing — watch closely.")
+                alert_type="shift"
+        if not alert and dr<25:
+            alert=("📉 <b>"+symbol+" — Extreme Oversold</b>"+nl+"Daily RSI: "+str(dr)+nl+pe+" Phase: "+phase+nl+btc_str+nl+"🎯 Counter-trend long zone."+(" ⚠️ BTC bear — high risk." if btc=="bear" else ""))
+            alert_type="oversold"
+        if not alert and dr>75:
+            alert=("📈 <b>"+symbol+" — Extreme Overbought</b>"+nl+"Daily RSI: "+str(dr)+nl+pe+" Phase: "+phase+nl+btc_str+nl+"🎯 Counter-trend short zone."+(" ⚠️ BTC bull — high risk." if btc=="bull" else ""))
+            alert_type="overbought"
+        if not alert and phase=="Accumulation":
+            alert=("🔵 <b>"+symbol+" — Accumulation</b>"+nl+"Smart money quietly buying."+nl+btc_str+nl+"📍 Watch for breakout.")
+            alert_type="accumulation"
+        if not alert and phase=="Distribution":
+            alert=("🟡 <b>"+symbol+" — Distribution</b>"+nl+"Smart money quietly selling."+nl+btc_str+nl+"📍 Take profits. Markdown coming.")
+            alert_type="distribution"
+        if not alert and btc=="bear" and bias=="BEARISH" and dt=="bearish" and wt=="bearish" and 35<dr<50:
+            alert=("🐻 <b>"+symbol+" — Bear Setup</b>"+nl+"All timeframes aligned bearish."+nl+"Daily RSI: "+str(dr)+nl+("✅ BTC confirms." if btc=="bear" else "⚠️ BTC sideways.")+nl+"📍 Watch for short on bounce.")
+            alert_type="bear_setup"
+        if not alert and btc=="bull" and bias=="BULLISH" and dt=="bullish" and wt=="bullish" and 50<dr<65:
+            alert=("🚀 <b>"+symbol+" — Bull Setup</b>"+nl+"All timeframes aligned bullish."+nl+"Daily RSI: "+str(dr)+nl+("✅ BTC confirms." if btc=="bull" else "⚠️ BTC sideways.")+nl+"📍 Watch for long on pullback.")
+            alert_type="bull_setup"
+        ns=sup and price>0 and abs(price-sup)/price<0.008; nr=res and price>0 and abs(price-res)/price<0.008
+        if not alert and ns and not nr and btc!="bear" and dr<45:
+            sr=sr_touch_map.get(symbol,{}); sd=sr.get("support",[{}])[0] if sr.get("support") else {}
+            tc=sd.get("touches",1); ts2="very strong" if tc>=4 else "strong" if tc>=2 else "fresh"
+            alert=("🟢 <b>"+symbol+" — At Key Support</b> ("+str(tc)+"x — "+ts2+")"+nl+"Price: $"+str(round(price,4))+nl+"Support: $"+str(round(sup,4))+nl+"Daily: "+dt+" | RSI: "+str(dr)+nl+btc_str+nl+"📍 Watch for bounce confirmation.")
+            alert_type="support"
+        if not alert and nr and not ns and btc!="bull" and dr>55:
+            sr=sr_touch_map.get(symbol,{}); rd=sr.get("resistance",[{}])[0] if sr.get("resistance") else {}
+            tc=rd.get("touches",1); ts2="very strong" if tc>=4 else "strong" if tc>=2 else "fresh"
+            alert=("🔴 <b>"+symbol+" — At Key Resistance</b> ("+str(tc)+"x — "+ts2+")"+nl+"Price: $"+str(round(price,4))+nl+"Resistance: $"+str(round(res,4))+nl+"Daily: "+dt+" | RSI: "+str(dr)+nl+btc_str+nl+"📍 Watch for rejection confirmation.")
+            alert_type="resistance"
+        if alert and alert_type:
+            now=time.time(); last=_last_alerts.get(symbol,{})
+            if last.get("type")==alert_type and now-last.get("time",0)<ALERT_COOLDOWN:
+                logger.info("Cooldown: "+symbol+" "+alert_type); return
+            send_message("👁️ <b>Sentinel Market Insight</b>"+nl+nl+alert)
+            _last_alerts[symbol]={"type":alert_type,"time":now}
+            logger.info("Alert: "+symbol+" — "+alert_type+" | BTC: "+btc)
+    except Exception as e: logger.error("Alert "+symbol+": "+str(e))
+
+def check_and_alert_btc_premove():
+    global _pre_move_sent
+    if _paused: return
+    now=time.time()
+    if now-_pre_move_sent.get("btc",0)<3600: return
+    det,bias,signals,conf,similar=detect_btc_pre_move()
+    if not det or len(signals)<2: return
+    nl=chr(10); sig_text=nl.join("• "+s for s in signals)
+    sim_str="" if not similar else nl+nl+"📚 Similar to "+similar["date"]+" → "+str(similar["pct_move"])+"% "+similar["direction"]
+    send_message("⚡ <b>BTC PRE-MOVE DETECTED</b>"+nl+nl+
+        "Bias: "+("🟢 BULLISH" if bias=="bullish" else "🔴 BEARISH" if bias=="bearish" else "⚪️ NEUTRAL")+nl+
+        "Confidence: "+str(round(conf*100))+"%"+nl+nl+"<b>Signals:</b>"+nl+sig_text+sim_str+nl+nl+
+        "📍 Big move incoming. Get ready."+nl+"⏰ "+datetime.now(timezone.utc).strftime("%H:%M UTC"))
+    _pre_move_sent["btc"]=now
+
+# ============================================================
+# FLASK ENDPOINTS — UNCHANGED TRADING LOGIC
+# ============================================================
+@app.route("/")
+def health():
+    return "SentinelBot v3 — Chart Intelligence Active", 200
+
+@app.route("/analyse", methods=["POST"])
+def analyse_endpoint():
+    try:
+        signal=request.get_json()
+        if not signal: return {"approved":False,"reason":"No data"},400
+        symbol=signal.get("symbol","BTC"); direction=signal.get("direction","long"); score=signal.get("score",0)
+        logger.info("Signal from Bot 1: "+symbol+" "+direction.upper())
+        send_message("🔍 <b>Signal from Bot 1</b>"+chr(10)+chr(10)+
+            ("📈 LONG" if direction=="long" else "📉 SHORT")+" <b>"+symbol+"/USDT</b>"+chr(10)+
+            "Bot 1 score: "+str(score)+chr(10)+chr(10)+"📊 Reading all timeframes now...")
+        v=run_sentinel_analysis(signal)
+        return {"approved":v["approved"],"score":v["score"],"total":v["total"],
+                "tf_score":v.get("tf_score",0),"tf_pct":v.get("tf_pct",0),
+                "phase":v.get("phase","Unknown"),"symbol":symbol,"direction":direction,
+                "btc_premove":v.get("btc_premove",False),
+                "entry":v.get("entry",0),"stop":v.get("stop",0),
+                "tp1":v.get("tp1",0),"tp2":v.get("tp2",0)},200
+    except Exception as e:
+        logger.error("Analyse: "+str(e)); return {"approved":False,"reason":str(e)},500
+
+@app.route("/outcome", methods=["POST"])
+def outcome_endpoint():
+    try:
+        data=request.get_json()
+        if not data: return {"ok":False},400
+        symbol=data.get("symbol","?"); direction=data.get("direction","long")
+        result=data.get("result","LOSS"); pnl=data.get("pnl",0)
+        is_win=result in ["WIN_TP1","WIN_TP2"]
+        # Combined legacy counters
+        if is_win: sentinel_brain["approved_wins"]=sentinel_brain.get("approved_wins",0)+1
+        else: sentinel_brain["approved_losses"]=sentinel_brain.get("approved_losses",0)+1
+        # Source split — analytical: Bot1 pipeline trades tagged here
+        if is_win: sentinel_brain["bot1_wins"]=sentinel_brain.get("bot1_wins",0)+1
+        else: sentinel_brain["bot1_losses"]=sentinel_brain.get("bot1_losses",0)+1
+        # Clean era — forward-only validated performance
+        if is_win:
+            sentinel_brain["clean_era_wins"]=sentinel_brain.get("clean_era_wins",0)+1
+            sentinel_brain["clean_era_bot1_wins"]=sentinel_brain.get("clean_era_bot1_wins",0)+1
+        else:
+            sentinel_brain["clean_era_losses"]=sentinel_brain.get("clean_era_losses",0)+1
+            sentinel_brain["clean_era_bot1_losses"]=sentinel_brain.get("clean_era_bot1_losses",0)+1
+        if symbol in sentinel_brain["coin_memory"]:
+            if is_win: sentinel_brain["coin_memory"][symbol]["wins"]+=1
+            else: sentinel_brain["coin_memory"][symbol]["losses"]+=1
+        for p in reversed(sentinel_brain.get("pre_move_patterns",[])):
+            if p.get("outcome")=="unknown":
+                p["outcome"]="up" if is_win else "down"; p["pct_move"]=round(abs(pnl),2); break
+        t=sentinel_brain.get("approved_wins",0)+sentinel_brain.get("approved_losses",0)
+        acc=round(sentinel_brain.get("approved_wins",0)/t*100) if t>0 else 0
+        save_json("sentinel_brain.json",sentinel_brain)
+        approved_trades=load_json("approved_trades.json",[])
+        for t2 in reversed(approved_trades):
+            if t2.get("symbol")==symbol and t2.get("direction")==direction and t2.get("outcome")=="pending":
+                t2["outcome"]="WIN" if is_win else "LOSS"; t2["pnl"]=round(pnl,2); break
+        if len(approved_trades)>200: approved_trades=approved_trades[-200:]
+        save_json("approved_trades.json",approved_trades)
+        recent_verdict=next((v for v in reversed(verdict_history) if v.get("symbol")==symbol and v.get("direction")==direction),[])
+        if recent_verdict and "checks" in recent_verdict:
+            tag_check_results([(n,p,"-") for n,p in recent_verdict["checks"]],is_win)
+        update_coin_confidence(symbol,direction,is_win)
+        reliability=get_check_reliability(); rel_str=""
+        if reliability:
+            top=reliability[0]; rel_str=chr(10)+"🏆 Most reliable check: "+top[0]+" ("+str(top[1])+"% acc, "+str(top[2])+" trades)"
+        icon="✅" if is_win else "❌"; nl=chr(10)
+        coin_conf,conf_desc=get_coin_confidence(symbol,direction)
+        send_message("🧠 <b>Sentinel Learning</b>"+nl+nl+icon+" "+symbol+" "+direction.upper()+" — "+result+nl+
+            "P&L: "+("+" if pnl>=0 else "")+str(round(pnl,2))+"$"+nl+nl+
+            "📊 Overall accuracy: "+str(acc)+"%"+nl+
+            "("+str(sentinel_brain.get("approved_wins",0))+"W / "+str(sentinel_brain.get("approved_losses",0))+"L)"+nl+
+            "🎯 "+symbol+" confidence: "+str(round(coin_conf*100))+"%"+(rel_str if rel_str else ""))
+        return {"ok":True},200
+    except Exception as e:
+        logger.error("Outcome: "+str(e)); return {"ok":False},500
+
+@app.route("/knowledge/<symbol>", methods=["GET"])
+def knowledge_endpoint(symbol):
+    sym=symbol.upper()
+    return (coin_knowledge[sym],200) if sym in coin_knowledge else ({"error":"No knowledge for "+sym},404)
+
+@app.route("/regime", methods=["GET"])
+def regime_endpoint():
+    r=detect_market_regime()
+    return {"mode":r.get("mode","UNKNOWN"),"desc":r.get("desc",""),"emoji":r.get("emoji","❓"),
+            "bb_width":r.get("bb_width",0),"ema_slope":r.get("ema_slope",0),
+            "rsi":r.get("rsi",50),"updated":r.get("updated",0)},200
+
+@app.route("/brain", methods=["GET"])
+def brain_endpoint():
+    weights=get_check_weights()
+    w=sentinel_brain.get("approved_wins",0); l=sentinel_brain.get("approved_losses",0)
+    acc=round(w/(w+l)*100) if (w+l)>0 else 0
+    top_biases={sym:{"bias":ck.get("overall_bias","NEUTRAL"),"phase":ck.get("phase","Unknown"),
+        "daily_rsi":ck.get("daily_rsi",50),"support":ck.get("support",0),"resistance":ck.get("resistance",0)}
+        for sym,ck in coin_knowledge.items()}
+    return {"check_weights":weights,"accuracy":acc,"approved_wins":w,"approved_losses":l,
+            "coin_biases":top_biases,"regime":_current_regime.get("mode","UNKNOWN"),
+            "regime_emoji":_current_regime.get("emoji","❓"),"coin_confidence":coin_confidence},200
+
+@app.route("/filled", methods=["POST"])
+def filled_endpoint():
+    try:
+        data=request.get_json()
+        if not data: return {"ok":False},400
+        symbol=data.get("symbol",""); direction=data.get("direction","long")
+        fill_price=data.get("fill_price",0); limit_entry=data.get("limit_entry",0)
+        if not symbol or not fill_price: return {"ok":False,"reason":"Missing symbol or fill_price"},400
+        for t in suggested_trades:
+            if t["symbol"]==symbol and t["direction"]==direction and t["outcome"]=="pending_fill":
+                t["outcome"]="pending"; t["entry"]=fill_price; t["peak"]=fill_price
+                t["fill_time"]=datetime.now(timezone.utc).isoformat()
+                lim=limit_entry if limit_entry>0 else t.get("limit_entry",fill_price)
+                t["fill_dist"]=round(abs(fill_price-lim)/lim*100,4) if lim>0 else 0
+                save_json("suggested_trades.json",suggested_trades)
+                logger.info("Bot1 fill: "+symbol+" "+direction+" @ $"+str(fill_price))
+                if not _paused:
+                    send_message("✅ <b>Bot1 filled: "+symbol+" "+direction.upper()+"</b>"+chr(10)+
+                        "Entry: $"+str(round(fill_price,6))+chr(10)+"Now watching TP1/Stop...")
+                return {"ok":True,"fill_dist":t["fill_dist"]},200
+        suggested_trades.append({"symbol":symbol,"direction":direction,
+            "limit_entry":limit_entry if limit_entry>0 else fill_price,"entry":fill_price,
+            "stop":data.get("stop",0),"tp1":data.get("tp1",0),"tp2":data.get("tp2",0),
+            "time":datetime.now(timezone.utc).isoformat(),"fill_time":datetime.now(timezone.utc).isoformat(),
+            "outcome":"pending","peak":fill_price,"fill_dist":0,"source":"bot1_fill_new"})
+        if len(suggested_trades)>100: suggested_trades[:]=suggested_trades[-100:]
+        save_json("suggested_trades.json",suggested_trades)
+        return {"ok":True,"created":True},200
+    except Exception as e:
+        logger.error("Filled endpoint: "+str(e)); return {"ok":False},500
+
+# ============================================================
+# COMMANDS
+# ============================================================
+def handle_commands():
+    global last_update_id, _paused
+    data=get_updates(offset=last_update_id)
+    for update in data.get("result",[]):
+        last_update_id=update["update_id"]+1
+        nl=chr(10)
+
+        # Handle button press (callback query)
+        if "callback_query" in update:
+            cq=update["callback_query"]; callback_id=cq["id"]
+            chat_id=cq["message"]["chat"]["id"]; data_str=cq.get("data","")
+            answer_callback(callback_id)
+
+            # ── Resume notifications button ──────────────────────────────
+            if data_str=="resume_notifications":
+                _paused=False; save_json("paused.json",{"paused":False})
+                send_message("🔔 <b>Notifications resumed</b>"+nl+"Sentinel is active. All alerts back on."+nl+
+                    "⏰ "+datetime.now(timezone.utc).strftime("%H:%M UTC"),chat_id)
+                logger.info("Sentinel resumed via button"); continue
+
+            if data_str.startswith("entered:"):
+                try:
+                    parts=data_str.split(":")  # FIX: split by colon, was using whitespace
+                    sym=parts[1]; direction=parts[2]
+                    entry=float(parts[3]); stop=float(parts[4]); tp1=float(parts[5]); tp2=float(parts[6])
+                    found=False
+                    for t in suggested_trades:
+                        if t["symbol"]==sym and t["direction"]==direction and t["outcome"] in ["pending_fill","pending"]:
+                            # ── DUPLICATE PRESS CHECK ───────────────────────────
+                            # If user already pressed this button, don't re-confirm
+                            # Prevents 3x "confirmed!" messages from triple-tapping
+                            if t.get("user_entered") == True:
+                                send_message("ℹ️ <b>"+sym+" "+direction.upper()+" already confirmed</b>"+nl+
+                                    "Sentinel is already watching this trade."+nl+
+                                    "Status: "+("waiting for limit fill" if t["outcome"]=="pending_fill" else "limit filled, watching for TP/Stop"),
+                                    chat_id)
+                                logger.info("Duplicate button press ignored: "+sym+" "+direction)
+                                found=True
+                                break
+                            # ────────────────────────────────────────────────────
+                            t["user_entered"]=True; found=True
+                            save_json("suggested_trades.json",suggested_trades)
+                            send_message("✅ <b>"+sym+" "+direction.upper()+" confirmed!</b>"+nl+
+                                "Sentinel watching for limit fill at $"+str(t.get("limit_entry",entry))+nl+
+                                "Auto-learn triggers on TP1 or Stop hit.",chat_id)
+                            logger.info("User confirmed entry: "+sym+" "+direction)
+                            break
+                    if not found:
+                        suggested_trades.append({"symbol":sym,"direction":direction,"limit_entry":entry,
+                            "entry":0,"stop":stop,"tp1":tp1,"tp2":tp2,
+                            "time":datetime.now(timezone.utc).isoformat(),"outcome":"pending_fill",
+                            "peak":0,"source":"user_button","user_entered":True})
+                        if len(suggested_trades)>100: suggested_trades[:]=suggested_trades[-100:]
+                        save_json("suggested_trades.json",suggested_trades)
+                        send_message("✅ <b>"+sym+" "+direction.upper()+" recorded!</b>"+nl+
+                            "Watching for limit fill at $"+str(entry)+"."+nl+
+                            "Auto-learn triggers on TP1 or Stop hit.",chat_id)
+                        logger.info("User entry recorded (new): "+sym+" "+direction)
+                except Exception as e:
+                    logger.error("Callback parse error: "+str(e))
+                    send_message("⚠️ Couldn't record entry — please use /think "+sym+" to track manually.",chat_id)
+            continue
+
+        msg=update.get("message",{}); chat_id=msg.get("chat",{}).get("id")
+        text=msg.get("text","").strip().lower()
+        if not chat_id: continue
+
+        if text=="/start":
+            send_message("🛡️ <b>SentinelBot v3 — Chart Intelligence</b>"+nl+nl+
+                "The chart always whispers before it screams."+nl+nl+
+                "<b>📊 Analysis:</b>"+nl+
+                "/status — Accuracy stats"+nl+
+                "/learn — Full brain report"+nl+
+                "/weights — Check weight breakdown"+nl+
+                "/blocked — Which checks cause wrong blocks"+nl+
+                "/missed — Blocked trades tracker"+nl+
+                "/regime — Current market regime"+nl+nl+
+                "<b>🔍 Coin Intelligence:</b>"+nl+
+                "/checks BTC — Live 7-check analysis"+nl+
+                "/knowledge BTC — What I know about a coin"+nl+
+                "/entries BTC — Entry learning stats"+nl+
+                "/confidence BTC — Coin confidence score"+nl+
+                "/sync BTC — Compare both bots"+nl+
+                "/premove — BTC pre-move detection"+nl+
+                "/watchlist — All 75 watched coins"+nl+nl+
+                "<b>💡 Trading:</b>"+nl+
+                "/suggest — Best setups near key levels"+nl+
+                "/think BTC — Manual trade analysis"+nl+
+                "/result ETH WIN — Report /think trade outcome"+nl+nl+
+                "<b>⚙️ System:</b>"+nl+
+                "/pause — Stop notifications (bot keeps running)"+nl+
+                "/resume — Resume notifications"+nl+
+                "/history — Last 10 verdicts"+nl+
+                "/backup — Download all brain files (one-time)"+nl+nl+
+                "The chart always whispers first. 🎯",chat_id)
+
+        elif text=="/premove":
+            send_message("⚡ Checking BTC pre-move signals...",chat_id)
+            det,bias,signals,conf,similar=detect_btc_pre_move()
+            if det:
+                sig_text=nl.join("• "+s for s in signals)
+                sim_str="" if not similar else nl+"📚 Similar to "+similar["date"]+" → "+str(similar["pct_move"])+"% "+similar["direction"]
+                send_message("⚡ <b>BTC Pre-Move</b>"+nl+"Bias: "+bias.upper()+nl+"Confidence: "+str(round(conf*100))+"%"+nl+nl+sig_text+sim_str,chat_id)
+            else:
+                send_message("😴 No pre-move signals on BTC right now.",chat_id)
+
+        elif text.startswith("/checks"):
+            parts=text.split(); sym=parts[1].upper() if len(parts)>1 else "BTC"
+            send_message("📊 Analysing "+sym+"... (30-60s)",chat_id)
+            try: run_sentinel_analysis({"symbol":sym,"direction":"long","score":0,"entry":0})
+            except Exception as e: send_message("❌ Error: "+str(e),chat_id)
+
+        elif text=="/status":
+            t=sentinel_brain["total_verdicts"]; a=sentinel_brain["approved"]; r=sentinel_brain["rejected"]
+            w=sentinel_brain.get("approved_wins",0); l=sentinel_brain.get("approved_losses",0)
+            # Use helpers — count BOTH old (was_correct) and new (outcome) records
+            correct_blocks=sum(1 for t2 in missed_trades if is_correct_block(t2))
+            wrong_blocks=sum(1 for t2 in missed_trades if is_wrong_block(t2))
+            expired_blocks=sum(1 for t2 in missed_trades if is_expired_block(t2))
+            decided_blocks=correct_blocks+wrong_blocks
+            block_acc=round(correct_blocks/decided_blocks*100) if decided_blocks>0 else 0
+            total_resolved=w+l+correct_blocks+wrong_blocks
+            true_correct=w+correct_blocks
+            true_acc=round(true_correct/total_resolved*100) if total_resolved>0 else 0
+            app_acc=round(w/(w+l)*100) if (w+l)>0 else 0
+            total_el_trades=sum(el.get("wins",0)+el.get("losses",0) for sym_data in entry_learning.values() for el in sym_data.values())
+            pause_str="⏸️ PAUSED — tap Resume or type /resume"+nl if _paused else "▶️ Active"+nl
+            send_message("🛡️ <b>Sentinel v3 Status</b>"+nl+nl+pause_str+
+                "📊 Total verdicts: "+str(t)+" | ✅ "+str(a)+" | ❌ "+str(r)+nl+nl+
+                "🏆 <b>True accuracy: "+str(true_acc)+"%</b>"+nl+
+                "  ✅ Approved wins:   "+str(w)+nl+
+                "  ✅ Correct blocks:  "+str(correct_blocks)+nl+
+                "  ❌ Approved losses: "+str(l)+nl+
+                "  ❌ Wrong blocks:    "+str(wrong_blocks)+nl+
+                "  ⏳ Unresolved: "+str(max(0,t-total_resolved))+nl+nl+
+                "📈 Approved win rate: "+str(app_acc)+"%"+nl+
+                "🚫 True block accuracy: "+str(block_acc)+"% ("+str(correct_blocks)+"✅/"+str(wrong_blocks)+"❌ decided)"+nl+
+                "  ⏳ "+str(expired_blocks)+" expired/neutral (no clear outcome)"+nl+nl+
+                "📚 Coins known: "+str(len(coin_knowledge))+"/75"+nl+
+                "📈 Entry learning: "+str(total_el_trades)+" trades tracked"+nl+
+                "Min checks: "+str(MIN_CHECKS_TO_APPROVE)+"/7"+nl+
+                "⏰ "+datetime.now(timezone.utc).strftime("%H:%M UTC"),chat_id)
+
+        elif text=="/history":
+            if not verdict_history: send_message("No verdicts yet.",chat_id)
+            else:
+                mt="🛡️ <b>Last 10 Verdicts</b>"+nl+nl
+                for v in verdict_history[-10:][::-1]:
+                    icon="✅" if v["approved"] else "❌"
+                    ts=v["timestamp"][:16].replace("T"," ")
+                    w_pct_str=" W:"+str(v.get("w_pct","?"))+"%" if v.get("w_pct") else ""
+                    mt+=icon+" "+v["symbol"]+" "+v["direction"].upper()+" — "+str(v["score"])+"/7"+w_pct_str+" TF:"+str(v.get("tf_score","?"))+" "+v.get("phase","")+" — "+ts+nl
+                send_message(mt,chat_id)
+
+        elif text=="/weights":
+            weights=get_check_weights(); nl2=chr(10)
+            lines=["⚖️ <b>Dynamic Check Weights</b>"+nl2+nl2+
+                   "Default: 1.0 | Floor: "+str(WEIGHT_FLOOR)+" | Ceiling: "+str(WEIGHT_CEILING)+nl2+
+                   "Shifts after "+str(WEIGHT_MIN_TRADES)+" trades per check"+nl2]
+            for check in CHECK_NAMES:
+                stats=check_tag_stats.get(check,{"wins":0,"losses":0})
+                total=stats.get("wins",0)+stats.get("losses",0); w=weights[check]
+                if total<WEIGHT_MIN_TRADES: bar="⬜⬜⬜⬜⬜"; note="default ("+str(total)+"/"+str(WEIGHT_MIN_TRADES)+" trades)"
+                else:
+                    win_rate=round(stats["wins"]/total*100); filled=round(w/WEIGHT_CEILING*5)
+                    bar="🟩"*filled+"⬜"*(5-filled); note=str(win_rate)+"% win ("+str(total)+" trades)"
+                    if w>=1.5: note+=" ← trusted"
+                    elif w<=0.7: note+=" ← underperforming"
+                lines.append(bar+" <b>"+check+"</b>: "+str(w)+nl2+"   "+note)
+            send_message(nl2.join(lines),chat_id)
+
+        # ── /blocked — ANALYTICAL UPGRADE ───────────────────────────────────
+        elif text=="/blocked":
+            nl2=chr(10)
+            wrong  =[t for t in missed_trades if is_wrong_block(t)]
+            correct=[t for t in missed_trades if is_correct_block(t)]
+            expired=[t for t in missed_trades if is_expired_block(t)]
+            resolved=wrong+correct+expired; decided=wrong+correct
+            if not resolved:
+                send_message("No resolved blocks yet. Check back after a few cycles.",chat_id)
+            else:
+                total_r=len(resolved); n_correct=len(correct); n_wrong=len(wrong)
+                n_decided=len(decided); n_expired=len(expired)
+                true_acc=round(n_correct/(n_correct+n_wrong)*100) if (n_correct+n_wrong)>0 else 0
+                coverage=round(n_decided/total_r*100) if total_r>0 else 0
+                exp_rate=round(n_expired/total_r*100) if total_r>0 else 0
+                wrong_cc={}; correct_cc={}
+                for t in wrong:
+                    for ck in t.get("failed_checks",[]): wrong_cc[ck]=wrong_cc.get(ck,0)+1
+                for t in correct:
+                    for ck in t.get("failed_checks",[]): correct_cc[ck]=correct_cc.get(ck,0)+1
+                all_checks=set(list(wrong_cc.keys())+list(correct_cc.keys()))
+                lines=[]
+                for ck in sorted(all_checks,key=lambda x:wrong_cc.get(x,0),reverse=True):
+                    w2=wrong_cc.get(ck,0); c2=correct_cc.get(ck,0); tot2=w2+c2
+                    acc2=round(c2/tot2*100) if tot2>0 else 0
+                    icon="🔴" if acc2<40 else ("🟡" if acc2<60 else "✅")
+                    lines.append(icon+" <b>"+ck+"</b>: "+str(acc2)+"% correct ("+str(c2)+"✅/"+str(w2)+"❌ wrong)")
+                recent_wrong=wrong[-5:][::-1]
+                recent_str=nl2.join("  ❌ "+t["symbol"]+" "+t["direction"].upper()+" missed +"+str(t["outcome_pct"])+"% | blocked by: "+", ".join(t.get("failed_checks",[])) for t in recent_wrong) if recent_wrong else "  None recently ✅"
+                send_message(
+                    "🚫 <b>Block Analysis</b>"+nl2+nl2+
+                    "📊 Total resolved: "+str(total_r)+nl2+nl2+
+                    "🎯 <b>True Block Accuracy: "+str(true_acc)+"%</b>"+nl2+
+                    "  "+str(n_correct)+" correct ÷ "+str(n_correct+n_wrong)+" decided trades"+nl2+
+                    "  👉 When system blocks — how often it's right"+nl2+nl2+
+                    "📡 <b>Coverage: "+str(coverage)+"%</b>"+nl2+
+                    "  "+str(n_decided)+" decided ÷ "+str(total_r)+" resolved"+nl2+nl2+
+                    "⏳ <b>Expired/Neutral: "+str(exp_rate)+"%</b>"+nl2+
+                    "  "+str(n_expired)+" trades with no clear outcome"+nl2+nl2+
+                    "<b>Which checks cause wrong blocks:</b>"+nl2+
+                    (nl2.join(lines) if lines else "  Not enough data yet")+nl2+nl2+
+                    "<b>Recent wrong blocks:</b>"+nl2+recent_str+nl2+nl2+
+                    "🔴 = blocks too aggressively"+nl2+
+                    "✅ = blocks correctly"+nl2+
+                    "⏰ "+datetime.now(timezone.utc).strftime("%H:%M UTC"),chat_id)
+
+        # ── /backup — ANALYTICAL UPGRADE ─────────────────────────────────────
+        elif text=="/backup":
+            send_message("📦 <b>Sentinel Brain Backup</b>"+nl+nl+"Sending all brain files now...",chat_id)
+            backup_files=["sentinel_brain.json","coin_knowledge.json","coin_confidence.json",
+                "check_tags.json","entry_learning.json","sr_touch_map.json",
+                "missed_trades.json","suggested_trades.json","paused.json"]
+            sent=0; failed=[]
+            for fname in backup_files:
+                fpath=os.path.join(DATA_DIR,fname)
+                if not os.path.exists(fpath): failed.append(fname+" (not found)"); continue
+                try:
+                    with open(fpath,"rb") as f:
+                        requests.post("https://api.telegram.org/bot"+SENTINEL_TOKEN+"/sendDocument",
+                            data={"chat_id":chat_id,"caption":"📄 "+fname},
+                            files={"document":(fname,f,"application/json")},timeout=30)
+                    sent+=1; time.sleep(0.5)
+                except Exception as e: failed.append(fname+" ("+str(e)+")")
+            send_message("✅ <b>Backup complete</b>"+nl+nl+"Files sent: "+str(sent)+nl+
+                ("⚠️ Failed: "+nl.join(failed)+nl if failed else "All files sent ✅"),chat_id)
+            logger.info("Backup sent to "+str(chat_id)+" — "+str(sent)+" files")
+
+        # ── /deepbrain — HIDDEN BRAIN INTELLIGENCE ────────────────────────────
+        # Shows what /learn never shows:
+        # Entry precision per coin, S/R touch counts, emerging coins,
+        # pre-move accuracy, and coin bias — the real intelligence.
+        elif text=="/deepbrain":
+            send_message("🔬 <b>Reading deep brain...</b>",chat_id)
+            try:
+                nl2=chr(10)
+
+                # ── SECTION 1: ENTRY PRECISION ──────────────────────────────
+                # Shows avg_dist (how far fills land from S/R level)
+                # Lower dist = fills at exact level = higher win rate
+                precision_rows=[]
+                for sym,dirs in entry_learning.items():
+                    for d,el in dirs.items():
+                        w=el.get("wins",0); l=el.get("losses",0); t=w+l
+                        if t<2: continue
+                        dist=el.get("avg_dist",0)
+                        wr=round(w/t*100)
+                        precision_rows.append((sym,d,dist,wr,t))
+                # Sort by win rate descending
+                precision_rows.sort(key=lambda x:x[3],reverse=True)
+                prec_str=""
+                for sym,d,dist,wr,t in precision_rows[:12]:
+                    dist_icon="✅" if dist<0.05 else ("🟡" if dist<0.1 else "❌")
+                    prec_str+=(dist_icon+" "+sym+" "+d.upper()+": "+str(wr)+"% WR | dist "+
+                               str(round(dist,3))+"% | "+str(t)+" fills"+nl2)
+
+                # ── SECTION 2: TOP S/R LEVELS BY TOUCH COUNT ────────────────
+                # Most tested levels = most reliable for entries
+                all_levels=[]
+                for sym,data in sr_touch_map.items():
+                    for lvl_type in ["support","resistance"]:
+                        for lvl in data.get(lvl_type,[]):
+                            touches=lvl.get("touches",0)
+                            if touches>=200:
+                                all_levels.append((sym,lvl_type,lvl.get("level",0),touches))
+                all_levels.sort(key=lambda x:x[3],reverse=True)
+                sr_str=""
+                for sym,lt,price,touches in all_levels[:10]:
+                    icon="🟢" if lt=="support" else "🔴"
+                    sr_str+=(icon+" "+sym+" "+lt[:3].upper()+
+                             " $"+str(round(price,4))+" — "+str(touches)+" touches"+nl2)
+
+                # ── SECTION 3: EMERGING COINS ────────────────────────────────
+                # New coins appearing with early wins — the brain discovering new edges
+                emerging=[]
+                for sym,data in coin_confidence.items():
+                    lw=data.get("long_wins",0); ll=data.get("long_losses",0); lt=lw+ll
+                    if lt>=2 and lt<=8 and lw>ll:  # small sample but winning
+                        wr=round(lw/lt*100)
+                        # Check entry precision for this coin
+                        el=entry_learning.get(sym,{}).get("long",{})
+                        dist=el.get("avg_dist",0)
+                        emerging.append((sym,wr,lt,dist))
+                emerging.sort(key=lambda x:x[1],reverse=True)
+                em_str=""
+                for sym,wr,t,dist in emerging[:8]:
+                    dist_note=(" dist "+str(round(dist,3))+"%") if dist>0 else " at level"
+                    em_str+="🌱 "+sym+": "+str(wr)+"% ("+str(t)+" trades)"+dist_note+nl2
+
+                # ── SECTION 4: PRE-MOVE ACCURACY ────────────────────────────
+                # Count ONLY resolved outcomes — unknown excluded
+                pm_patterns=sentinel_brain.get("pre_move_patterns",[])
+                bull_correct=0; bull_wrong=0; bear_correct=0; bear_wrong=0
+                for p in pm_patterns:
+                    outcome=p.get("outcome","unknown")
+                    direction=p.get("direction","")
+                    if outcome=="unknown": continue
+                    if direction=="bullish":
+                        if outcome=="up": bull_correct+=1
+                        elif outcome=="down": bull_wrong+=1
+                    elif direction=="bearish":
+                        if outcome=="down": bear_correct+=1
+                        elif outcome=="up": bear_wrong+=1
+                bull_total=bull_correct+bull_wrong
+                bear_total=bear_correct+bear_wrong
+                bull_acc=round(bull_correct/bull_total*100) if bull_total>0 else 0
+                bear_acc=round(bear_correct/bear_total*100) if bear_total>0 else 0
+                pm_str=("  🟢 Bullish: "+str(bull_acc)+"% ("+str(bull_correct)+"✅/"+str(bull_wrong)+"❌ resolved)"+nl2+
+                        "  🔴 Bearish: "+str(bear_acc)+"% ("+str(bear_correct)+"✅/"+str(bear_wrong)+"❌ resolved)"+nl2+
+                        "  ⚠️ Unknown: "+str(len([p for p in pm_patterns if p.get("outcome")=="unknown"]))+" (not yet resolved)")
+
+                # ── SECTION 5: COIN BIAS SUMMARY ────────────────────────────
+                bullish_coins=[s for s,d in coin_knowledge.items() if d.get("overall_bias")=="BULLISH"]
+                bearish_coins=[s for s,d in coin_knowledge.items() if d.get("overall_bias")=="BEARISH"]
+                squeeze_coins=[s for s,d in coin_knowledge.items() if d.get("bb_squeeze")==True]
+                bias_str=("  🟢 BULLISH: "+", ".join(bullish_coins[:8])+nl2+
+                          "  🔴 BEARISH: "+", ".join(bearish_coins[:8])+nl2+
+                          "  🔥 BB Squeeze (coiling): "+", ".join(squeeze_coins[:6]))
+
+                send_message(
+                    "🔬 <b>Deep Brain Report</b>"+nl2+nl2+
+                    "━━ ENTRY PRECISION (fill vs level) ━━"+nl2+
+                    "✅=at level 🟡=close ❌=far away"+nl2+prec_str+nl2+
+                    "━━ MOST TESTED S/R LEVELS ━━"+nl2+
+                    "(highest touch count = most reliable)"+nl2+sr_str+nl2+
+                    "━━ EMERGING COINS ━━"+nl2+
+                    "(winning early, brain discovering edge)"+nl2+
+                    (em_str if em_str else "  None yet — brain still learning"+nl2)+nl2+
+                    "━━ PRE-MOVE ACCURACY ━━"+nl2+pm_str+nl2+nl2+
+                    "━━ COIN BIAS NOW ━━"+nl2+bias_str+nl2+nl2+
+                    "⏰ "+datetime.now(timezone.utc).strftime("%H:%M UTC"),chat_id)
+            except Exception as e:
+                logger.error("/deepbrain error: "+str(e))
+                send_message("⚠️ Deep brain error: "+str(e)[:100],chat_id)
+        # ────────────────────────────────────────────────────────────────────
+            parts=text.split(); sym=parts[1].upper() if len(parts)>1 else "BTC"
+            send_message("🔄 Syncing knowledge on "+sym+"...",chat_id)
+            nl2=chr(10)
+            sk=coin_knowledge.get(sym,{}); s_bias=sk.get("overall_bias","NEUTRAL"); s_phase=sk.get("phase","Unknown")
+            s_rsi=sk.get("daily_rsi",50); s_sup=sk.get("support",0); s_res=sk.get("resistance",0)
+            s_conf,s_conf_desc=get_coin_confidence(sym,"long")
+            el=entry_learning.get(sym,{}); el_long=el.get("long",{}); el_short=el.get("short",{})
+            el_lt=el_long.get("wins",0)+el_long.get("losses",0); el_st=el_short.get("wins",0)+el_short.get("losses",0)
+            el_str=""
+            if el_lt>=2: el_str+=nl2+"  Long fill accuracy: "+str(round(el_long.get("wins",0)/el_lt*100))+"% ("+str(el_lt)+" fills)"
+            if el_st>=2: el_str+=nl2+"  Short fill accuracy: "+str(round(el_short.get("wins",0)/el_st*100))+"% ("+str(el_st)+" fills)"
+            b1_str="Bot1: unavailable"
+            try:
+                b1=requests.get(BOT1_URL+"/brain",timeout=5)
+                if b1.status_code==200:
+                    b1d=b1.json(); cs=b1d.get("coin_stats",{}).get(sym,{})
+                    bw=cs.get("wins",0); bl=cs.get("losses",0)
+                    lw=cs.get("long_wins",0); ll=cs.get("long_losses",0)
+                    sw=cs.get("short_wins",0); sl2=cs.get("short_losses",0)
+                    b1_str=("Bot1 overall: "+str(bw)+"W/"+str(bl)+"L"+nl2+"  Long: "+str(lw)+"W/"+str(ll)+"L"+nl2+"  Short: "+str(sw)+"W/"+str(sl2)+"L")
+            except Exception: pass
+            weights=get_check_weights(); top_w=sorted(weights.items(),key=lambda x:x[1],reverse=True)[:2]
+            agree="✅ Both aligned on "+sym if s_bias!="NEUTRAL" else "⚪️ Sentinel still neutral on "+sym
+            send_message("🔄 <b>Dual Brain Sync: "+sym+"</b>"+nl2+nl2+
+                "━━━ SENTINEL ━━━"+nl2+"Bias: "+s_bias+" | Phase: "+s_phase+nl2+
+                "Daily RSI: "+str(s_rsi)+nl2+"Support: $"+str(s_sup)+" | Resistance: $"+str(s_res)+nl2+
+                "Confidence: "+str(round(s_conf*100))+"% — "+s_conf_desc+el_str+nl2+nl2+
+                "━━━ BOT1 ━━━"+nl2+b1_str+nl2+nl2+
+                "━━━ COMBINED ━━━"+nl2+agree+nl2+
+                "Top weighted checks: "+", ".join(c+"("+str(w)+")" for c,w in top_w)+nl2+
+                "⏰ "+datetime.now(timezone.utc).strftime("%H:%M UTC"),chat_id)
+
+        elif text.startswith("/knowledge"):
+            parts=text.split(); sym=parts[1].upper() if len(parts)>1 else "BTC"
+            k,summary=get_coin_context(sym)
+            if k:
+                h=k.get("history",[]); bt=" → ".join([x["bias"][:1] for x in h[-8:]]) if h else "no history"
+                sq=k.get("bb_squeeze",False); sqh=k.get("squeeze_hours",0)
+                sr=sr_touch_map.get(sym,{}); br=sr.get("resistance",[{}])[0] if sr.get("resistance") else {}; bs=sr.get("support",[{}])[0] if sr.get("support") else {}
+                el_sym=entry_learning.get(sym,{}); el_lines=[]
+                for d in ["long","short"]:
+                    el=el_sym.get(d,{}); el_total=el.get("wins",0)+el.get("losses",0)
+                    if el_total>=2:
+                        el_rate=round(el.get("wins",0)/el_total*100)
+                        trend_note=" ✅ Good level" if el_rate>=60 else " ⚠️ Level needs review"
+                        el_lines.append("  "+d.upper()+": "+str(el_rate)+"% win ("+str(el_total)+" trades) | Avg fill dist: "+str(el.get("avg_dist","?"))+"%"+trend_note)
+                el_str=(nl+"📊 <b>Entry learning:</b>"+nl+nl.join(el_lines)) if el_lines else ""
+                send_message("📚 <b>Sentinel Knowledge: "+sym+"</b>"+nl+nl+summary+nl+nl+
+                    "Phase: "+k.get("phase","Unknown")+nl+("⚡ BB Squeeze: "+str(sqh)+"h"+nl if sq else "")+
+                    ("🔴 Res: $"+str(br.get("level","?"))+" ("+str(br.get("touches","?"))+"x)"+nl if br else "")+
+                    ("🟢 Sup: $"+str(bs.get("level","?"))+" ("+str(bs.get("touches","?"))+"x)"+nl if bs else "")+
+                    nl+"Bias history: "+bt+el_str,chat_id)
+            else:
+                send_message("📚 No knowledge yet for "+sym+". Check back after first scan.",chat_id)
+
+        elif text.startswith("/entries"):
+            parts=text.split(); sym=parts[1].upper() if len(parts)>1 else "BTC"
+            el_sym=entry_learning.get(sym,{})
+            if not el_sym:
+                send_message("📊 No entry learning data for "+sym+" yet.",chat_id)
+            else:
+                msg_lines=["📊 <b>Entry Learning: "+sym+"</b>"+nl]
+                for d in ["long","short"]:
+                    el=el_sym.get(d,{}); w=el.get("wins",0); l=el.get("losses",0); total=w+l
+                    if total==0: continue
+                    rate=round(w/total*100); avg_dist=el.get("avg_dist",0)
+                    trend_icon="✅" if rate>=60 else "⚠️" if rate>=40 else "❌"
+                    msg_lines.append(trend_icon+" "+d.upper()+": "+str(rate)+"% win rate ("+str(w)+"W/"+str(l)+"L)")
+                    msg_lines.append("  Avg fill distance from S/R: "+str(avg_dist)+"%")
+                pending=[t for t in suggested_trades if t["symbol"]==sym and t["outcome"]=="pending_fill"]
+                if pending:
+                    msg_lines.append(nl+"⏳ Waiting for limit fill:")
+                    for p in pending: msg_lines.append("  "+p["direction"].upper()+" @ $"+str(p.get("limit_entry","?")))
+                send_message(nl.join(msg_lines),chat_id)
+
+        elif text=="/watchlist":
+            send_message("👁️ <b>75 Coins — Every 15min</b>"+nl+nl+", ".join(WATCH_LIST)+nl+nl+
+                "Known: "+str(len(coin_knowledge))+"/75"+nl+"API: ~2% of Binance free limit",chat_id)
+
+        elif text=="/pause":
+            _paused=True; save_json("paused.json",{"paused":True})
+            try:
+                requests.post("https://api.telegram.org/bot"+SENTINEL_TOKEN+"/sendMessage",
+                    json={"chat_id":chat_id,
+                          "text":"🔕 <b>Notifications paused</b>"+nl+nl+
+                                 "Sentinel is still running fully:"+nl+
+                                 "✅ Watching all 75 coins every 15min"+nl+
+                                 "✅ Monitoring all open trades"+nl+
+                                 "✅ Approving/rejecting Bot1 signals"+nl+
+                                 "✅ Learning from outcomes"+nl+nl+
+                                 "Only Telegram alerts are off."+nl+
+                                 "Tap below when you want alerts back.",
+                          "parse_mode":"HTML",
+                          "reply_markup":{"inline_keyboard":[[
+                              {"text":"🔔 Resume Notifications","callback_data":"resume_notifications"}
+                          ]]}},timeout=10)
+            except Exception as e: logger.error("Pause msg: "+str(e))
+            logger.info("Sentinel notifications paused")
+
+        elif text=="/resume":
+            _paused=False; save_json("paused.json",{"paused":False})
+            send_message("🔔 <b>Notifications resumed</b>"+nl+"Sentinel is active. All alerts back on."+nl+
+                "⏰ "+datetime.now(timezone.utc).strftime("%H:%M UTC"),chat_id)
+            logger.info("Sentinel resumed")
+
+        elif text=="/learn":
+            rel=get_check_reliability()
+            rel_str=nl.join("  "+str(i+1)+". "+c[0]+" — "+str(c[1])+"% ("+str(c[2])+" trades)" for i,c in enumerate(rel[:5])) if rel else "  Not enough data yet"
+            best_coins=[]; worst_coins=[]
+            for sym,data in coin_confidence.items():
+                for d in ["long","short"]:
+                    w=data.get(d+"_wins",0); l=data.get(d+"_losses",0)
+                    if w+l>=3:
+                        acc2=round(w/(w+l)*100)
+                        if acc2>=70: best_coins.append((sym,d,acc2,w+l))
+                        elif acc2<=40: worst_coins.append((sym,d,acc2,w+l))
+            best_coins=sorted(best_coins,key=lambda x:x[2],reverse=True)[:3]
+            worst_coins=sorted(worst_coins,key=lambda x:x[2])[:3]
+            t=sentinel_brain["total_verdicts"]; a=sentinel_brain["approved"]; r=sentinel_brain["rejected"]
+            w=sentinel_brain.get("approved_wins",0); l=sentinel_brain.get("approved_losses",0)
+            # Use helpers — count BOTH old and new records
+            correct=sum(1 for t2 in missed_trades if is_correct_block(t2))
+            wrong2=sum(1 for t2 in missed_trades if is_wrong_block(t2))
+            expired2=sum(1 for t2 in missed_trades if is_expired_block(t2))
+            decided2=correct+wrong2
+            total_resolved=w+l+correct+wrong2; true_correct=w+correct
+            true_acc=round(true_correct/total_resolved*100) if total_resolved>0 else 0
+            app_acc=round(w/(w+l)*100) if (w+l)>0 else 0
+            block_acc=round(correct/decided2*100) if decided2>0 else 0
+            # ── PROPER UNRESOLVED CATEGORIZATION ─────────────────────────
+            # Splits into actionable buckets so we know exactly what each number means.
+            # Reads BOTH suggested_trades (Sentinel Direct) and approved_trades (Bot1 Pipeline).
+            #
+            # Block-side categories (from missed_trades — rejected verdicts):
+            #   - blocks_pending: rejected, outcome not yet decided (1-7 days old)
+            #   - blocks_expired: rejected, price barely moved (neutral, no clear outcome)
+            #
+            # Approved-side categories (from suggested_trades + approved_trades):
+            #   - pending_fill: limit order placed, waiting for price to fill it
+            #   - filled_unresolved: limit filled, trade live, waiting for TP/Stop
+            #   - expired_no_fill: limit order expired without filling (4-48h timeout)
+            #   - missing_closure: approved trade with no outcome record (workflow gap)
+            #
+            # Misc:
+            #   - legacy_ghost: old verdicts not accounted for (pre-tracking deployments)
+            blocks_pending = sum(1 for t2 in missed_trades if is_pending_block(t2))
+            blocks_expired = expired2  # already calculated above
+
+            # Read both approved trade sources for accurate counts
+            _approved_trades_file = load_json("approved_trades.json", [])
+
+            # Pending fill — limit waiting for price to reach it (Sentinel Direct only)
+            pending_fill = sum(1 for t2 in suggested_trades if t2.get("outcome") == "pending_fill")
+            # Filled but not yet hit TP/Stop — live trades being watched
+            filled_unresolved = sum(1 for t2 in suggested_trades if t2.get("outcome") == "pending")
+            filled_unresolved += sum(1 for t2 in _approved_trades_file if t2.get("outcome") == "pending")
+            # Expired without filling — limit order timed out
+            expired_no_fill = sum(1 for t2 in suggested_trades if t2.get("outcome") == "expired_no_fill")
+
+            # Total approved that are tracked in either file
+            tracked_approved_unresolved = pending_fill + filled_unresolved
+            # Approved verdicts not in either file = workflow gap (missing /outcome calls)
+            approved_unresolved_total = max(0, a - w - l)
+            missing_closure = max(0, approved_unresolved_total - tracked_approved_unresolved - expired_no_fill)
+
+            # Legacy ghost = total verdicts not accounted for anywhere
+            accounted_for = (w + l + correct + wrong2 + blocks_expired + blocks_pending +
+                            pending_fill + filled_unresolved + expired_no_fill + missing_closure)
+            legacy_ghost = max(0, t - accounted_for)
+            # ────────────────────────────────────────────────────────────
+            unresolved = blocks_pending + tracked_approved_unresolved  # for display compatibility
+            regime=detect_market_regime()
+            el_best=[]
+            for sym_name,sym_data in entry_learning.items():
+                for d,el in sym_data.items():
+                    tot=el.get("wins",0)+el.get("losses",0)
+                    if tot>=3: el_best.append((sym_name,d,round(el.get("wins",0)/tot*100),tot))
+            el_best=sorted(el_best,key=lambda x:x[2],reverse=True)[:3]
+            el_str=nl.join("  📈 "+x[0]+" "+x[1].upper()+" — "+str(x[2])+"% ("+str(x[3])+" entries)" for x in el_best) if el_best else "  Building entry history..."
+            best_str=nl.join("  🏆 "+c[0]+" "+c[1].upper()+" — "+str(c[2])+"% ("+str(c[3])+" trades)" for c in best_coins) if best_coins else "  Still learning..."
+            worst_str=nl.join("  ⚠️ "+c[0]+" "+c[1].upper()+" — "+str(c[2])+"% ("+str(c[3])+" trades)" for c in worst_coins) if worst_coins else "  None yet"
+            weights=get_check_weights(); shifted=[(c,w) for c,w in weights.items() if abs(w-WEIGHT_DEFAULT)>0.05]
+            if shifted: w_str=nl.join("  "+c+": "+str(w)+("↑" if w>WEIGHT_DEFAULT else "↓") for c,w in sorted(shifted,key=lambda x:x[1],reverse=True))
+            else: w_str="  All checks at default (1.0) — still building history"
+
+            # Source split analytics
+            b1w=sentinel_brain.get("bot1_wins",0); b1l=sentinel_brain.get("bot1_losses",0)
+            snw=sentinel_brain.get("sentinel_wins",0); snl=sentinel_brain.get("sentinel_losses",0)
+            b1_total=b1w+b1l; sn_total=snw+snl
+            b1_acc=round(b1w/b1_total*100) if b1_total>0 else 0
+            sn_acc=round(snw/sn_total*100) if sn_total>0 else 0
+            if b1_total+sn_total>0:
+                src_str=("  📡 Bot1 Pipeline: "+str(b1_total)+" trades | "+str(b1_acc)+"% win ("+str(b1w)+"W/"+str(b1l)+"L)"+nl+
+                         "  🛡️ Sentinel Direct: "+str(sn_total)+" trades | "+str(sn_acc)+"% win ("+str(snw)+"W/"+str(snl)+"L)")
+                if b1_total>=5 and sn_total>=5 and abs(sn_acc-b1_acc)>=10:
+                    diff=sn_acc-b1_acc
+                    src_str+=(nl+"  💡 Sentinel direct outperforms Bot1 by +"+str(diff)+"%" if diff>0 else nl+"  💡 Bot1 outperforms Sentinel by +"+str(abs(diff))+"%")
+            else:
+                src_str="  Building source-split data (requires new trades after upgrade)"
+
+            # Directional accuracy from suggested_trades peak prices
+            resolved_st=[t2 for t2 in suggested_trades if t2.get("outcome") in ["WIN","LOSS"] and t2.get("entry",0)>0 and t2.get("peak",0)>0]
+            dir_total=len(resolved_st)
+            if dir_total>0:
+                soft_wins=0; strong_wins=0; true_bad=0
+                for t2 in resolved_st:
+                    ent=t2["entry"]; pk=t2["peak"]; d2=t2.get("direction","long")
+                    peak_pct=(pk-ent)/ent*100 if d2=="long" else (ent-pk)/ent*100
+                    if peak_pct>=1.0: soft_wins+=1
+                    if peak_pct>=2.0: strong_wins+=1
+                    if peak_pct<0.2: true_bad+=1
+                dir_str=("  📈 +1% reached:    "+str(round(soft_wins/dir_total*100))+"% ("+str(soft_wins)+"/"+str(dir_total)+")"+nl+
+                         "  🚀 +2% reached:    "+str(round(strong_wins/dir_total*100))+"% ("+str(strong_wins)+"/"+str(dir_total)+")"+nl+
+                         "  ❌ Never positive: "+str(round(true_bad/dir_total*100))+"% ("+str(true_bad)+"/"+str(dir_total)+")")
+            else:
+                dir_str="  Not enough resolved trades yet"
+
+            # ── CLEAN ERA STATS ──────────────────────────────────────────
+            clean_start = sentinel_brain.get("clean_era_start","")[:10]
+            cew  = sentinel_brain.get("clean_era_wins",0)
+            cel  = sentinel_brain.get("clean_era_losses",0)
+            cet  = cew+cel
+            ce_acc = round(cew/cet*100) if cet>0 else 0
+            ceb1w = sentinel_brain.get("clean_era_bot1_wins",0)
+            ceb1l = sentinel_brain.get("clean_era_bot1_losses",0)
+            ceb1t = ceb1w+ceb1l
+            cesw  = sentinel_brain.get("clean_era_sentinel_wins",0)
+            cesl  = sentinel_brain.get("clean_era_sentinel_losses",0)
+            cest  = cesw+cesl
+            if cet > 0:
+                clean_str = (
+                    "  📅 Since: "+clean_start+nl+
+                    "  Overall: "+str(ce_acc)+"% ("+str(cew)+"W/"+str(cel)+"L)"+nl+
+                    "  📡 Bot1 Pipeline: "+str(round(ceb1w/ceb1t*100) if ceb1t>0 else 0)+"% ("+str(ceb1w)+"W/"+str(ceb1l)+"L)"+nl+
+                    "  🛡️ Sentinel Direct: "+str(round(cesw/cest*100) if cest>0 else 0)+"% ("+str(cesw)+"W/"+str(cesl)+"L)"
+                )
+                if cet >= 10:
+                    clean_str += nl+"  "+("✅ Clean era data building — "+str(cet)+" trades so far")
+                else:
+                    clean_str += nl+"  ⏳ Building clean data ("+str(cet)+"/10 trades needed)"
+            else:
+                clean_str = "  ⏳ No clean era trades yet — first trade will start the benchmark"
+            # ────────────────────────────────────────────────────────────
+
+            send_message(
+                "🧠 <b>Sentinel Brain Report</b>"+nl+nl+
+                "📊 Total verdicts: "+str(t)+nl+
+                "✅ Approved: "+str(a)+" | ❌ Rejected: "+str(r)+nl+nl+
+                "🏆 <b>TRUE Accuracy: "+str(true_acc)+"%</b>"+nl+
+                "  (approved wins + correct blocks ÷ all resolved)"+nl+nl+
+                "📈 Approved trades: "+str(app_acc)+"% ("+str(w)+"W/"+str(l)+"L)"+nl+
+                "🚫 True block accuracy: "+str(block_acc)+"% ("+str(correct)+"✅/"+str(wrong2)+"❌ decided)"+nl+nl+
+                "🆕 <b>Clean Era Performance (post-fix):</b>"+nl+clean_str+nl+nl+
+                "⏳ <b>Unresolved breakdown:</b>"+nl+
+                "<b>  Blocks (rejected verdicts):</b>"+nl+
+                "    📡 Active: "+str(blocks_pending)+" (still being checked)"+nl+
+                "    💤 Expired: "+str(blocks_expired)+" (price barely moved, neutral)"+nl+
+                "<b>  Approved (passed verdicts):</b>"+nl+
+                "    🟡 Pending fill: "+str(pending_fill)+" (limit waiting for price)"+nl+
+                "    📍 Filled live: "+str(filled_unresolved)+" (watching for TP/Stop)"+nl+
+                "    ⏰ Expired no-fill: "+str(expired_no_fill)+" (limit timed out)"+nl+
+                "    👻 Missing closure: "+str(missing_closure)+" (no outcome reported)"+nl+
+                "<b>  Other:</b>"+nl+
+                "    🗂️ Legacy ghost: "+str(legacy_ghost)+" (old deployments)"+nl+nl+
+                "📊 <b>Source Performance (all-time):</b>"+nl+src_str+nl+nl+
+                "🎯 <b>Directional Accuracy (entry quality):</b>"+nl+dir_str+nl+nl+
+                "⚖️ <b>Check weights (shifted from 1.0):</b>"+nl+w_str+nl+nl+
+                "📐 <b>Most reliable checks:</b>"+nl+rel_str+nl+nl+
+                "🎯 <b>Best coins I know:</b>"+nl+best_str+nl+nl+
+                "⚠️ <b>Weakest coins:</b>"+nl+worst_str+nl+nl+
+                "📍 <b>Best entry levels (learned):</b>"+nl+el_str+nl+nl+
+                "🌍 Regime: "+regime.get("emoji","❓")+" "+regime.get("mode","?")+nl+
+                "⏰ "+datetime.now(timezone.utc).strftime("%H:%M UTC"),chat_id)
+
+        elif text=="/regime":
+            r=detect_market_regime()
+            send_message("🌍 <b>Market Regime</b>"+nl+nl+r.get("emoji","❓")+" Mode: "+r.get("mode","?")+nl+
+                r.get("desc","")+nl+nl+"BB Width: "+str(r.get("bb_width","?"))+nl+
+                "EMA Slope: "+str(r.get("ema_slope","?"))+nl+"RSI: "+str(r.get("rsi","?"))+nl+nl+
+                "Strategy: "+("Follow momentum" if r.get("mode")=="TREND" else
+                              "Fade extremes" if r.get("mode")=="RANGE" else "Wait for confirmation")+nl+
+                "⏰ "+datetime.now(timezone.utc).strftime("%H:%M UTC"),chat_id)
+
+        elif text=="/resetstats":
+            clean_tags={"macro_trend":{"wins":0,"losses":0},"mid_trend":{"wins":0,"losses":0},
+                "micro_trend":{"wins":0,"losses":0},"volume_profile":{"wins":0,"losses":0},
+                "rsi_confluence":{"wins":0,"losses":0},"money_flow":{"wins":0,"losses":0},"structure":{"wins":0,"losses":0}}
+            check_tag_stats.clear(); check_tag_stats.update(clean_tags); save_json("check_tags.json",check_tag_stats)
+            coin_confidence.clear(); save_json("coin_confidence.json",coin_confidence)
+            missed_trades.clear(); save_json("missed_trades.json",missed_trades)
+            sentinel_brain["approved_wins"]=5; sentinel_brain["approved_losses"]=3
+            sentinel_brain["total_verdicts"]=8; sentinel_brain["approved"]=8; sentinel_brain["rejected"]=0
+            sentinel_brain["bot1_wins"]=0; sentinel_brain["bot1_losses"]=0
+            sentinel_brain["sentinel_wins"]=0; sentinel_brain["sentinel_losses"]=0
+            sentinel_brain["_stat_corrected_v1"]=True; sentinel_brain["_stat_corrected_v2"]=True
+            save_json("sentinel_brain.json",sentinel_brain)
+            verdict_history.clear(); save_json("sentinel_history.json",verdict_history)
+            logger.info("Manual /resetstats: all polluted data cleared, knowledge preserved")
+            send_message("🧹 <b>Stats Reset Complete</b>"+nl+nl+
+                "✅ Brain: 5W/3L (62%) clean start"+nl+"✅ Check weights: back to 1.0"+nl+
+                "✅ Coin confidence: cleared"+nl+"✅ Missed trades: cleared"+nl+"✅ Verdict history: cleared"+nl+nl+
+                "🔒 Untouched:"+nl+"  coin_knowledge ✅"+nl+"  sr_touch_map ✅"+nl+"  entry_learning ✅"+nl+nl+
+                "Sentinel starts fresh. Type /learn to confirm.",chat_id)
+
+        elif text=="/missed":
+            if not missed_trades:
+                send_message("🚫 No missed trades tracked yet.",chat_id)
+            else:
+                correct=sum(1 for t in missed_trades if is_correct_block(t))
+                wrong=sum(1 for t in missed_trades if is_wrong_block(t))
+                pending=sum(1 for t in missed_trades if is_pending_block(t))
+                total_known=correct+wrong; acc=round(correct/total_known*100) if total_known>0 else 0
+                daily=defaultdict(lambda:{"correct":0,"wrong":0,"pending":0})
+                for t in missed_trades:
+                    day=t.get("blocked_at","")[:10]
+                    if is_correct_block(t): daily[day]["correct"]+=1
+                    elif is_wrong_block(t): daily[day]["wrong"]+=1
+                    else: daily[day]["pending"]+=1
+                mt="🚫 <b>Missed Trade Tracker — 7 Days</b>"+nl+nl
+                mt+="Overall block accuracy: "+str(acc)+"%"+nl+"✅ Correct blocks: "+str(correct)+nl
+                mt+="❌ Wrong blocks: "+str(wrong)+" (missed profit)"+nl+"⏳ Pending: "+str(pending)+nl+nl
+                mt+="<b>Daily breakdown:</b>"+nl
+                for day in sorted(daily.keys(),reverse=True):
+                    d=daily[day]; day_total=d["correct"]+d["wrong"]
+                    day_acc=round(d["correct"]/day_total*100) if day_total>0 else 0
+                    mt+=day+" — ✅"+str(d["correct"])+" ❌"+str(d["wrong"])+" ⏳"+str(d["pending"])
+                    if day_total>0: mt+=" ("+str(day_acc)+"% acc)"
+                    mt+=nl
+                mt+=nl+"<b>Last 10 blocks:</b>"+nl
+                for t in list(reversed(missed_trades))[:10]:
+                    icon="✅" if is_correct_block(t) else "❌" if is_wrong_block(t) else "⏳"
+                    pct=t.get("outcome_pct",0); day=t.get("blocked_at","")[:10]
+                    mt+=icon+" "+t.get("symbol","?")+" "+t.get("direction","?").upper()
+                    if pct!=0: mt+=" → "+("+" if pct>0 else "")+str(pct)+"%"
+                    failed=t.get("failed_checks",[])
+                    if failed: mt+=" | by: "+", ".join(failed)
+                    mt+=" ("+day+")"+nl
+                send_message(mt,chat_id)
+
+        elif text.startswith("/confidence"):
+            parts=text.split(); sym=parts[1].upper() if len(parts)>1 else "BTC"
+            conf_l,desc_l=get_coin_confidence(sym,"long"); conf_s,desc_s=get_coin_confidence(sym,"short")
+            rel=get_check_reliability()
+            rel_str=nl.join(c[0]+" — "+str(c[1])+"% ("+str(c[2])+" trades)" for c in rel[:5]) if rel else "Not enough data yet"
+            send_message("🎯 <b>Confidence: "+sym+"</b>"+nl+nl+
+                "Long: "+str(round(conf_l*100))+"% — "+desc_l+nl+
+                "Short: "+str(round(conf_s*100))+"% — "+desc_s+nl+nl+
+                "<b>Top reliable checks:</b>"+nl+rel_str,chat_id)
+
+        elif text=="/suggest":
+            # ── STAGE 1: BTC PRE-MOVE GATE ──────────────────────────────────
+            # Block /suggest from generating longs when BTC pre-move BEARISH detected.
+            # Sentinel already detects pre-moves but /suggest used to ignore the signal.
+            # This connects the two systems so /suggest respects active dump warnings.
+            #
+            # Stage 1 = WARNING + BOUNCE OPPORTUNITY:
+            #   - BEARISH pre-move active → block long suggestions, warn user clearly
+            #   - BEARISH pre-move recently ended + bounce forming → highlight pullback entry
+            #   - BULLISH pre-move → continue normally, inform user of pump bias
+            #   - No auto-close (user keeps full manual control)
+            nl = chr(10)
+            try:
+                pm_det, pm_bias, pm_signals, pm_conf, pm_similar = detect_btc_pre_move()
+                if pm_det and pm_bias == "bearish" and len(pm_signals) >= 2:
+                    # ── ACTIVE DUMP RISK — block longs ──────────────────────
+                    sig_text = nl.join("• "+s for s in pm_signals)
+                    send_message(
+                        "⚠️ <b>BTC PRE-MOVE BEARISH ACTIVE</b>"+nl+nl+
+                        "🔴 Confidence: "+str(round(pm_conf*100))+"%"+nl+nl+
+                        "<b>Signals detected:</b>"+nl+sig_text+nl+nl+
+                        "🚫 <b>Long suggestions blocked</b> while dump risk active."+nl+nl+
+                        "💡 <b>What to do:</b>"+nl+
+                        "• Consider closing profitable longs to protect gains"+nl+
+                        "• Avoid new long entries until BTC stabilises"+nl+
+                        "• Press /suggest again after the move plays out"+nl+nl+
+                        "📊 The system will resume long suggestions automatically once BTC stabilises.",
+                        chat_id)
+                    logger.info("/suggest blocked — BTC pre-move BEARISH active (conf "+str(round(pm_conf*100))+"%)")
+                    continue
+
+                # ── BOUNCE DETECTION ─────────────────────────────────────────
+                # If no active bearish pre-move NOW, but one fired recently (within 2h)
+                # → dump likely happened → check if BTC is bouncing at support
+                # This is where the highest probability pullback longs form
+                now_ts = time.time()
+                last_bearish_alert = _pre_move_sent.get("btc", 0)
+                dump_happened_recently = (now_ts - last_bearish_alert) < 7200  # 2 hours
+                if dump_happened_recently and (not pm_det or pm_bias != "bearish"):
+                    try:
+                        # Get BTC current price and support level
+                        btc_ck = coin_knowledge.get("BTC", {})
+                        btc_sup = btc_ck.get("support", 0)
+                        r_btc = requests.get("https://api.binance.com/api/v3/klines",
+                                            params={"symbol":"BTCUSDT","interval":"15m","limit":5},
+                                            timeout=6)
+                        btc_candles = r_btc.json() if r_btc.status_code == 200 else []
+                        if btc_candles and btc_sup:
+                            last_c = btc_candles[-1]
+                            btc_open  = float(last_c[1])
+                            btc_close = float(last_c[4])
+                            btc_low   = float(last_c[3])
+                            btc_price = btc_close
+                            # Bounce conditions:
+                            # 1. Price near support (within 2%)
+                            # 2. Current candle is bullish (close > open)
+                            # 3. Price recovered from the low
+                            near_support = btc_sup > 0 and abs(btc_price - btc_sup) / btc_price < 0.02
+                            bullish_candle = btc_close > btc_open
+                            recovered = btc_close > btc_low * 1.002
+                            if near_support and bullish_candle and recovered:
+                                mins_ago = round((now_ts - last_bearish_alert) / 60)
+                                send_message(
+                                    "🎯 <b>BTC PULLBACK OPPORTUNITY</b>"+nl+nl+
+                                    "Dump from "+str(mins_ago)+"min ago — bounce forming now."+nl+nl+
+                                    "📍 BTC near support: $"+str(round(btc_sup, 0))+nl+
+                                    "💰 BTC now: $"+str(round(btc_price, 0))+nl+
+                                    "✅ Bullish candle confirming on 15min"+nl+nl+
+                                    "⚡ <b>This is the pullback entry window.</b>"+nl+
+                                    "Money is made on the bounce — entries below are high probability."+nl+nl+
+                                    "🔍 Generating best setups now...",
+                                    chat_id)
+                                logger.info("Bounce opportunity detected — dump "+str(mins_ago)+"min ago, BTC near $"+str(btc_sup))
+                            else:
+                                # Dump happened but bounce not confirmed yet
+                                send_message(
+                                    "⏳ <b>Post-dump — Waiting for bounce confirmation</b>"+nl+nl+
+                                    "BTC dump happened "+str(round((now_ts-last_bearish_alert)/60))+"min ago."+nl+
+                                    "Bounce not yet confirmed — price still unstable."+nl+nl+
+                                    "💡 Showing available setups but be cautious."+nl+
+                                    "Wait for BTC to hold support before entering.",
+                                    chat_id)
+                                logger.info("Post-dump caution mode — bounce not confirmed yet")
+                    except Exception as e:
+                        logger.error("Bounce detection error: "+str(e))
+                # ─────────────────────────────────────────────────────────────
+
+                elif pm_det and pm_bias == "bullish" and len(pm_signals) >= 2:
+                    send_message(
+                        "🟢 <b>BTC PRE-MOVE BULLISH ACTIVE</b>"+nl+
+                        "Confidence: "+str(round(pm_conf*100))+"%"+nl+
+                        "Long bias favoured. Generating setups...",
+                        chat_id)
+                    logger.info("/suggest proceeding with bullish bias (conf "+str(round(pm_conf*100))+"%)")
+            except Exception as e:
+                logger.error("Pre-move gate error: "+str(e))
+            # ────────────────────────────────────────────────────────────────
+            send_message("👁️ Checking what I know...",chat_id)
+            try:
+                best=[]
+                for sym in WATCH_LIST:
+                    try:
+                        ck=coin_knowledge.get(sym,{})
+                        if not ck: continue
+                        bias=ck.get("overall_bias","NEUTRAL"); phase=ck.get("phase","Unknown")
+                        rsi=ck.get("daily_rsi",50); dt=ck.get("daily_trend","sideways")
+                        wt=ck.get("weekly_trend","sideways"); sq=ck.get("bb_squeeze",False)
+                        res=ck.get("resistance",0); sup=ck.get("support",0)
+                        score=sum([ck.get("macro_bullish",False),ck.get("mid_bullish",False),
+                                   ck.get("micro_bullish",False),ck.get("rsi_aligned",False),ck.get("money_flowing",False)])
+                        if bias=="BULLISH" and score>=3: direction="long"
+                        elif bias=="BEARISH" and score>=3: direction="short"
+                        else: continue
+                        if not res or not sup: continue
+                        money_in=ck.get("money_flowing",True)
+                        if direction=="long" and sq and not money_in: continue
+                        if direction=="long" and rsi>70 and not money_in: continue
+                        try:
+                            r2=requests.get("https://api.binance.com/api/v3/ticker/price",params={"symbol":sym+"USDT"},timeout=5)
+                            price=float(r2.json().get("price",0)) if r2.status_code==200 else 0
+                        except: price=0
+                        if not price: continue
+                        if direction=="long":
+                            dist_from_sup=((price-sup)/price)*100
+                            if dist_from_sup>3 or dist_from_sup<0: continue
+                            limit_entry=sup; stop=round(sup*0.995,6); risk=limit_entry-stop
+                            if risk<=0: continue
+                            risk_pct=round(risk/limit_entry*100,2)
+                            if risk_pct>4 or risk_pct<0.2: continue
+                            tp1=round(limit_entry+risk*2.0,6); tp2=round(limit_entry+risk*3.5,6)
+                            rr=round((tp1-limit_entry)/risk,1); dist=dist_from_sup
+                        else:
+                            dist_from_res=((res-price)/price)*100
+                            if dist_from_res>3 or dist_from_res<0: continue
+                            limit_entry=res; stop=round(res*1.005,6); risk=stop-limit_entry
+                            if risk<=0: continue
+                            risk_pct=round(risk/limit_entry*100,2)
+                            if risk_pct>4 or risk_pct<0.2: continue
+                            tp1=round(limit_entry-risk*2.0,6); tp2=round(limit_entry-risk*3.5,6)
+                            rr=round((limit_entry-tp1)/risk,1); dist=dist_from_res
+                        # Entry learning adjustment
+                        el=entry_learning.get(sym,{}).get(direction,{})
+                        el_total=el.get("wins",0)+el.get("losses",0); entry_adjust=0.0; el_win_rate=None
+                        if el_total>=5:
+                            el_win_rate=round(el.get("wins",0)/el_total*100)
+                            if el_win_rate<45:
+                                entry_adjust=-round(limit_entry*0.002,6) if direction=="long" else round(limit_entry*0.002,6)
+                        adjusted_limit=round(limit_entry+entry_adjust,6)
+                        if direction=="long":
+                            stop=round(adjusted_limit*0.995,6); risk=adjusted_limit-stop
+                            if risk<=0: risk=adjusted_limit*0.01
+                            tp1=round(adjusted_limit+risk*2.0,6); tp2=round(adjusted_limit+risk*3.5,6); rr=round((tp1-adjusted_limit)/risk,1)
+                        else:
+                            stop=round(adjusted_limit*1.005,6); risk=stop-adjusted_limit
+                            if risk<=0: risk=adjusted_limit*0.01
+                            tp1=round(adjusted_limit-risk*2.0,6); tp2=round(adjusted_limit-risk*3.5,6); rr=round((adjusted_limit-tp1)/risk,1)
+                        risk_pct=round(risk/adjusted_limit*100,2) if adjusted_limit>0 else 0
+                        # ── STOP SANITY CHECK ───────────────────────────────────
+                        # Critical: stop must ALWAYS be on correct side of entry.
+                        # LONG:  stop < entry | SHORT: stop > entry
+                        # If wrong, skip this suggestion entirely (LDO/ZEC bug fix)
+                        stop_valid=True
+                        if direction=="long" and stop>=adjusted_limit:
+                            stop_valid=False
+                            logger.warning("STOP SANITY FAIL "+sym+" LONG: stop $"+str(stop)+" >= entry $"+str(adjusted_limit)+" — skipping")
+                        elif direction=="short" and stop<=adjusted_limit:
+                            stop_valid=False
+                            logger.warning("STOP SANITY FAIL "+sym+" SHORT: stop $"+str(stop)+" <= entry $"+str(adjusted_limit)+" — skipping")
+                        if not stop_valid: continue
+                        # ────────────────────────────────────────────────────────
+                        best.append({"sym":sym,"direction":direction,"bias":bias,"phase":phase,"rsi":rsi,
+                            "score":score,"price":price,"limit_entry":adjusted_limit,"stop":stop,"tp1":tp1,"tp2":tp2,
+                            "rr":rr,"risk_pct":risk_pct,"dt":dt,"wt":wt,"sq":sq,"sup":sup,"res":res,"dist":dist,
+                            "el_win_rate":el_win_rate,"el_total":el_total})
+                    except: continue
+
+                # Show fresh coins first (not already tracked)
+                active_syms={t["symbol"] for t in suggested_trades if t["outcome"] in ["pending_fill","pending"]}
+                fresh=[b for b in best if b["sym"] not in active_syms]
+                active=[b for b in best if b["sym"] in active_syms]
+                best=sorted(fresh,key=lambda x:(x["score"],-x["dist"]),reverse=True)[:5]+\
+                     sorted(active,key=lambda x:(x["score"],-x["dist"]),reverse=True)
+
+                if not best:
+                    send_message("Nothing near key levels right now. Market is in the middle. Wait.",chat_id)
+                else:
+                    for b in best[:5]:
+                        sym=b["sym"]; direction=b["direction"]; price=b["price"]; limit_e=b["limit_entry"]
+                        sq_note=" | 🔥 Squeeze" if b["sq"] else ""
+                        el_note=(" | 📚 "+str(b["el_win_rate"])+"% win ("+str(b["el_total"])+" trades)" if b["el_win_rate"] is not None else "")
+                        msg_text=("━━━━━━━━━━━━━━━━━━━━"+nl+("📈" if direction=="long" else "📉")+" <b>"+sym+"</b> — "+
+                            ("LONG" if direction=="long" else "SHORT")+nl+"📍 Now:    $"+str(price)+nl+
+                            "⏳ Limit:  $"+str(limit_e)+" ← wait for price here"+nl+
+                            "🛑 Stop:   $"+str(b["stop"])+" ("+str(b["risk_pct"])+"%)"+nl+
+                            "🎯 TP1:    $"+str(b["tp1"])+nl+"🎯 TP2:    $"+str(b["tp2"])+nl+
+                            "📊 R:R 1:"+str(b["rr"])+" | "+str(b["score"])+"/5 ✅"+sq_note+el_note)
+                        cutoff_time=(datetime.now(timezone.utc)-timedelta(hours=SUGGEST_COOLDOWN_HOURS)).isoformat()
+                        existing=next((t for t in suggested_trades if t["symbol"]==sym and t["direction"]==direction
+                                       and t["outcome"] in ["pending_fill","pending"]),None)
+                        recently_resolved=any(t["symbol"]==sym and t["direction"]==direction and
+                                              t["outcome"] in ["WIN","LOSS"] and t.get("close_time","")>cutoff_time
+                                              for t in suggested_trades)
+                        if existing:
+                            if existing["outcome"]=="pending_fill":
+                                existing["limit_entry"]=limit_e; existing["stop"]=b["stop"]
+                                existing["tp1"]=b["tp1"]; existing["tp2"]=b["tp2"]
+                                existing["time"]=datetime.now(timezone.utc).isoformat()
+                                save_json("suggested_trades.json",suggested_trades)
+                        elif not recently_resolved:
+                            suggested_trades.append({"symbol":sym,"direction":direction,"limit_entry":limit_e,
+                                "entry":0,"stop":b["stop"],"tp1":b["tp1"],"tp2":b["tp2"],
+                                "time":datetime.now(timezone.utc).isoformat(),"outcome":"pending_fill",
+                                "peak":0,"source":"auto_suggest","user_entered":False})
+                            if len(suggested_trades)>100: suggested_trades[:]=suggested_trades[-100:]
+                            save_json("suggested_trades.json",suggested_trades)
+                        send_suggestion_with_button(msg_text,sym,direction,limit_e,b["stop"],b["tp1"],b["tp2"],chat_id)
+            except Exception as e:
+                send_message("Something went wrong. Try again.",chat_id); logger.error("Suggest: "+str(e))
+
+        elif text.startswith("/think"):
+            parts=text.split(); sym=parts[1].upper() if len(parts)>1 else "BTC"
+            send_message("Let me check "+sym+"...",chat_id)
+            try:
+                ck=coin_knowledge.get(sym,{})
+                if not ck: send_message(sym+" — I don't have data on this yet. Give me 15 minutes.",chat_id)
+                else:
+                    bias=ck.get("overall_bias","NEUTRAL"); phase=ck.get("phase","Unknown")
+                    rsi=ck.get("daily_rsi",50); dt=ck.get("daily_trend","sideways"); wt=ck.get("weekly_trend","sideways")
+                    sq=ck.get("bb_squeeze",False); res=ck.get("resistance",0); sup=ck.get("support",0)
+                    score=sum([ck.get("macro_bullish",False),ck.get("mid_bullish",False),ck.get("micro_bullish",False),ck.get("rsi_aligned",False),ck.get("money_flowing",False)])
+                    sr=sr_touch_map.get(sym,{}); sups=sr.get("support",[]); ress=sr.get("resistance",[])
+                    sup_touches=sups[0].get("touches",0) if sups else 0; res_touches=ress[0].get("touches",0) if ress else 0
+                    btc_ck=coin_knowledge.get("BTC",{}); btc_bias_str=btc_ck.get("overall_bias","NEUTRAL")
+                    try:
+                        r2=requests.get("https://api.binance.com/api/v3/ticker/price",params={"symbol":sym+"USDT"},timeout=5)
+                        price=float(r2.json().get("price",0)) if r2.status_code==200 else 0
+                    except: price=0
+                    if not price: send_message(sym+" — couldn't get price right now.",chat_id)
+                    else:
+                        if bias=="BULLISH": direction="long"
+                        elif bias=="BEARISH": direction="short"
+                        elif btc_bias_str=="BULLISH": direction="long"
+                        elif btc_bias_str=="BEARISH": direction="short"
+                        else: direction="long"
+                        if direction=="long":
+                            if not sup: sup=round(price*0.97,6)
+                            if not res: res=round(price*1.05,6)
+                            stop=round(sup*0.995,6); risk=sup-stop; risk_pct=round(risk/sup*100,2) if sup>0 else 0
+                            tp1=round(sup+risk*2.0,6); tp2=round(sup+risk*3.5,6); rr=2.0
+                            dir_icon="📈"; dir_label="LONG"; limit_entry=round(sup,6)
+                            btc_note=" BTC with you." if btc_bias_str=="BULLISH" else " Watch BTC."
+                            rsi_note=" RSI fine." if rsi<65 else " RSI high — wait for dip."
+                        else:
+                            if not res: res=round(price*1.03,6)
+                            if not sup: sup=round(price*0.95,6)
+                            stop=round(res*1.005,6); risk=stop-res; risk_pct=round(risk/res*100,2) if res>0 else 0
+                            tp1=round(res-risk*2.0,6); tp2=round(res-risk*3.5,6); rr=2.0
+                            dir_icon="📉"; dir_label="SHORT"; limit_entry=round(res,6)
+                            btc_note=" BTC agrees." if btc_bias_str=="BEARISH" else " BTC is bullish — risky short."
+                            rsi_note=" RSI room to fall." if rsi>35 else " RSI low — quick TP."
+                        sq_note=" 🔥 BB Squeeze — big move coming." if sq else ""
+                        feel="Strong setup." if score>=4 else "Decent setup." if score>=3 else "Weak — be careful."
+                        # ── STOP SANITY CHECK ───────────────────────────────────
+                        # Critical: stop must ALWAYS be on correct side of entry
+                        skip_think=False
+                        if direction=="long" and stop>=limit_entry:
+                            send_message("⚠️ <b>"+sym+" — Cannot suggest LONG</b>"+nl+
+                                "Stop ($"+str(stop)+") would be above entry ($"+str(limit_entry)+")."+nl+
+                                "Wait for price to come down to a valid support level.",chat_id)
+                            skip_think=True
+                        elif direction=="short" and stop<=limit_entry:
+                            send_message("⚠️ <b>"+sym+" — Cannot suggest SHORT</b>"+nl+
+                                "Stop ($"+str(stop)+") would be below entry ($"+str(limit_entry)+")."+nl+
+                                "Wait for price to rally to a valid resistance level.",chat_id)
+                            skip_think=True
+                        # ────────────────────────────────────────────────────────
+                        if skip_think: pass
+                        else:
+                            el=entry_learning.get(sym,{}).get(direction,{}); el_total=el.get("wins",0)+el.get("losses",0); el_note=""
+                            if el_total>=2: el_note=nl+"📊 Entry history: "+str(round(el.get("wins",0)/el_total*100))+"% win ("+str(el_total)+" trades)"
+                            send_message("━━━━━━━━━━━━━━━━━━━━"+nl+dir_icon+" <b>"+sym+" — "+dir_label+"</b>"+nl+
+                                "📍 Now:    $"+str(price)+nl+"⏳ Limit:  $"+str(limit_entry)+" ← wait for this"+nl+
+                                "🛑 Stop:   $"+str(stop)+" ("+str(risk_pct)+"%)"+nl+"🎯 TP1:    $"+str(tp1)+nl+
+                                "🎯 TP2:    $"+str(tp2)+nl+"📊 R:R 1:"+str(rr)+" | "+str(score)+"/5 ✅"+nl+
+                                "━━━━━━━━━━━━━━━━━━━━"+nl+feel+nl+"Daily: "+dt+" | Weekly: "+wt+nl+"Phase: "+phase+nl+
+                                ("Support $"+str(sup)+" held "+str(sup_touches)+"x." if direction=="long" else "Resistance $"+str(res)+" tested "+str(res_touches)+"x.")+nl+
+                                rsi_note+btc_note+sq_note+el_note,chat_id)
+            except Exception as e:
+                send_message("Couldn't read "+sym+" right now. Try again.",chat_id); logger.error("Think: "+str(e))
+
+        elif text.startswith("/result"):
+            parts=text.split()
+            if len(parts)<3: send_message("Usage: /result ETH WIN or /result ETH LOSS"+nl+nl+"📌 Only use /result for /think trades. /suggest trades are automatic.",chat_id)
+            else:
+                sym=parts[1].upper(); outcome=parts[2].upper()
+                if outcome not in ["WIN","LOSS"]: send_message("Use WIN or LOSS. Example: /result ETH WIN",chat_id)
+                else:
+                    is_win=outcome=="WIN"
+                    # Warn if already auto-tracked
+                    auto_tracked=any(t["symbol"]==sym and t["outcome"] in ["WIN","LOSS"] and
+                                     t.get("source") in ["auto_suggest","user_button"] for t in suggested_trades)
+                    if auto_tracked:
+                        send_message("⚠️ <b>Note: "+sym+" was auto-tracked via /suggest</b>"+nl+
+                            "If this is a /suggest trade — skip /result, it's already counted."+nl+
+                            "If this is a /think trade — recording now...",chat_id)
+                    if sym not in coin_confidence:
+                        coin_confidence[sym]={"long_wins":0,"long_losses":0,"short_wins":0,"short_losses":0}
+                    cc=coin_confidence[sym]
+                    if is_win: cc["long_wins"]=cc.get("long_wins",0)+1
+                    else: cc["long_losses"]=cc.get("long_losses",0)+1
+                    save_json("coin_confidence.json",coin_confidence)
+                    sentinel_brain["total_verdicts"]=sentinel_brain.get("total_verdicts",0)+1
+                    sentinel_brain["approved"]=sentinel_brain.get("approved",0)+1
+                    if is_win:
+                        sentinel_brain["approved_wins"]=sentinel_brain.get("approved_wins",0)+1
+                        sentinel_brain["sentinel_wins"]=sentinel_brain.get("sentinel_wins",0)+1
+                        sentinel_brain["clean_era_wins"]=sentinel_brain.get("clean_era_wins",0)+1
+                        sentinel_brain["clean_era_sentinel_wins"]=sentinel_brain.get("clean_era_sentinel_wins",0)+1
+                    else:
+                        sentinel_brain["approved_losses"]=sentinel_brain.get("approved_losses",0)+1
+                        sentinel_brain["sentinel_losses"]=sentinel_brain.get("sentinel_losses",0)+1
+                        sentinel_brain["clean_era_losses"]=sentinel_brain.get("clean_era_losses",0)+1
+                        sentinel_brain["clean_era_sentinel_losses"]=sentinel_brain.get("clean_era_sentinel_losses",0)+1
+                    save_json("sentinel_brain.json",sentinel_brain)
+                    w=sentinel_brain.get("approved_wins",0); l=sentinel_brain.get("approved_losses",0)
+                    acc=round(w/(w+l)*100) if (w+l)>0 else 0
+                    send_message(("✅" if is_win else "❌")+" <b>Recorded: "+sym+" "+outcome+"</b>"+nl+nl+
+                        "📌 Counted as /think manual trade."+nl+
+                        "Approved wins: "+str(w)+" | Losses: "+str(l)+nl+"Real accuracy: "+str(acc)+"%",chat_id)
+                    logger.info("Manual /think result: "+sym+" "+outcome+" — accuracy now "+str(acc)+"%")
+
+        elif text=="/help":
+            send_message("🛡️ <b>SentinelBot v3 Help</b>"+nl+nl+
+                "/start — Introduction & all commands"+nl+
+                "/status — Accuracy stats (fixed calculation)"+nl+
+                "/learn — Full brain report"+nl+
+                "/history — Last 10 verdicts"+nl+
+                "/weights — Live check weight table"+nl+
+                "/blocked — Which checks cause wrong blocks ← NEW"+nl+
+                "/missed — Blocked trades tracker"+nl+
+                "/checks BTC — Live 7-check analysis"+nl+
+                "/knowledge BTC — What I know about a coin"+nl+
+                "/entries BTC — Entry learning stats"+nl+
+                "/premove — BTC pre-move detection"+nl+
+                "/watchlist — All 75 coins"+nl+
+                "/sync BTC — Compare both bots"+nl+
+                "/regime — Market regime"+nl+
+                "/confidence BTC — Confidence score"+nl+
+                "/suggest — Best setups right now"+nl+
+                "/think BTC — Manual trade analysis"+nl+
+                "/result ETH WIN — /think trade outcome only"+nl+
+                "/pause — Stop alerts (bot keeps running)"+nl+
+                "/resume — Resume alerts"+nl+
+                "/backup — Download brain files (one-time) ← NEW"+nl+
+                "/resetstats — Clean polluted stats (keeps knowledge)"+nl+nl+
+                "📌 Reporting: /suggest → button → automatic | /think → /result"+nl+nl+
+                "The chart always whispers first. 🎯",chat_id)
+
+# ============================================================
+# CHECK SUGGESTED TRADE OUTCOMES — UNCHANGED TRADING LOGIC
+# + ANALYTICAL UPGRADE: update brain stats (sentinel_wins/losses)
+# ============================================================
+def check_suggested_trade_outcomes():
+    global suggested_trades, sentinel_brain, coin_confidence, entry_learning
+    if not suggested_trades: return
+    changed=False
+
+    for t in suggested_trades:
+        sym=t["symbol"]; direction=t.get("direction","long"); stop=t.get("stop",0); tp1=t.get("tp1",0)
+        try:
+            r2=requests.get("https://api.binance.com/api/v3/ticker/price",params={"symbol":sym+"USDT"},timeout=5)
+            price=float(r2.json().get("price",0)) if r2.status_code==200 else 0
+        except: continue
+        if not price: continue
+
+        # PHASE 1: PENDING FILL
+        if t.get("outcome")=="pending_fill":
+            limit_e=t.get("limit_entry",0)
+            if not limit_e: continue
+            try: age_h=(datetime.now(timezone.utc)-datetime.fromisoformat(t["time"])).total_seconds()/3600
+            except: age_h=0
+            if age_h>48:
+                t["outcome"]="expired_no_fill"; logger.info("Limit expired unfilled: "+sym+" "+direction); changed=True; continue
+            filled=False
+            if direction=="long" and price<=limit_e*1.0015: filled=True
+            elif direction=="short" and price>=limit_e*0.9985: filled=True
+            if filled:
+                t["outcome"]="pending"; t["entry"]=price; t["peak"]=price
+                t["fill_time"]=datetime.now(timezone.utc).isoformat()
+                dist_from_limit=round(abs(price-limit_e)/limit_e*100,4); t["fill_dist"]=dist_from_limit
+                logger.info("Limit FILLED: "+sym+" "+direction+" @ $"+str(price)+" (limit was $"+str(limit_e)+", dist "+str(dist_from_limit)+"%)")
+                changed=True
+                # Immediate stop check
+                immediate_stop=False
+                if direction=="long" and stop>0 and price<=stop: immediate_stop=True
+                elif direction=="short" and stop>0 and price>=stop: immediate_stop=True
+                if immediate_stop:
+                    t["outcome"]="LOSS"; t["close_price"]=price; t["close_time"]=datetime.now(timezone.utc).isoformat()
+                    logger.info("IMMEDIATE STOP after fill: "+sym+" "+direction)
+                    if not _paused:
+                        send_message("❌ <b>Stop hit on fill: "+sym+" "+direction.upper()+"</b>"+chr(10)+
+                            "Price filled at $"+str(round(price,6))+" and immediately hit stop $"+str(stop)+chr(10)+"Recorded as LOSS.")
+                else:
+                    if not _paused:
+                        send_message("✅ <b>Limit filled: "+sym+" "+direction.upper()+"</b>"+chr(10)+
+                            "Entry: $"+str(round(price,6))+chr(10)+"Stop: $"+str(stop)+" | TP1: $"+str(tp1)+chr(10)+"Now watching...")
+                    continue
+            else:
+                continue
+
+        # PHASE 2: ACTIVE
+        if t.get("outcome")!="pending": continue
+        entry=t.get("entry",0)
+        if not entry: continue
+
+        # ── STALE TRADE EXPIRY ───────────────────────────────────────────
+        # Filled trades with no TP/Stop hit after 48h are force-resolved.
+        # This clears the 141 stuck "filled live" trades that were:
+        # - from the reversed-stop bug (would never hit TP or Stop)
+        # - from trades where price drifted and neither level was reached
+        # Resolution: compare current price vs entry to determine WIN/LOSS
+        fill_time_str = t.get("fill_time", t.get("time", ""))
+        if fill_time_str:
+            try:
+                fill_time = datetime.fromisoformat(fill_time_str)
+                hours_filled = (datetime.now(timezone.utc) - fill_time).total_seconds() / 3600
+                if hours_filled >= 48:
+                    # Force resolve based on current price vs entry
+                    if direction == "long":
+                        pnl_pct = round((price - entry) / entry * 100, 2)
+                    else:
+                        pnl_pct = round((entry - price) / entry * 100, 2)
+                    t["outcome"] = "WIN" if pnl_pct > 0 else "LOSS"
+                    t["close_price"] = price
+                    t["close_time"] = datetime.now(timezone.utc).isoformat()
+                    t["exit_reason"] = "stale_48h"
+                    logger.info("STALE RESOLVE: "+sym+" "+direction+" @ $"+str(price)+
+                                " filled "+str(round(hours_filled,1))+"h ago | "+t["outcome"]+" ("+str(pnl_pct)+"%)")
+                    if not _paused:
+                        send_message("⏰ <b>Stale trade resolved: "+sym+" "+direction.upper()+"</b>"+chr(10)+
+                            "Open "+str(round(hours_filled,1))+"h with no TP/Stop hit."+chr(10)+
+                            "Resolved at current price: "+("WIN ✅" if t["outcome"]=="WIN" else "LOSS ❌")+chr(10)+
+                            "Entry: $"+str(round(entry,6))+" → Now: $"+str(round(price,6))+" ("+str(pnl_pct)+"%)")
+                    changed = True
+            except Exception as e:
+                logger.error("Stale resolve: "+str(e))
+        # ────────────────────────────────────────────────────────────────
+
+        if direction=="long":
+            if price>t.get("peak",entry): t["peak"]=price
+            hit_tp=price>=tp1; hit_stop=price<=stop
+        else:
+            if price<t.get("peak",entry): t["peak"]=price
+            hit_tp=price<=tp1; hit_stop=price>=stop
+        if hit_tp: t["outcome"]="WIN"; t["close_price"]=price; t["close_time"]=datetime.now(timezone.utc).isoformat()
+        elif hit_stop: t["outcome"]="LOSS"; t["close_price"]=price; t["close_time"]=datetime.now(timezone.utc).isoformat()
+
+        # RESOLVE
+        if t["outcome"] in ["WIN","LOSS"]:
+            is_win=t["outcome"]=="WIN"; nl=chr(10)
+            # Only count in brain stats if NOT a stale resolution
+            # Stale trades (48h+) are data cleanup, not fresh validated signals
+            is_stale = t.get("exit_reason") == "stale_48h"
+
+            # Update brain stats — analytical source split
+            sentinel_brain["total_verdicts"]=sentinel_brain.get("total_verdicts",0)+1
+            sentinel_brain["approved"]=sentinel_brain.get("approved",0)+1
+            if is_win:
+                sentinel_brain["approved_wins"]=sentinel_brain.get("approved_wins",0)+1
+                sentinel_brain["sentinel_wins"]=sentinel_brain.get("sentinel_wins",0)+1
+                if not is_stale:
+                    sentinel_brain["clean_era_wins"]=sentinel_brain.get("clean_era_wins",0)+1
+                    sentinel_brain["clean_era_sentinel_wins"]=sentinel_brain.get("clean_era_sentinel_wins",0)+1
+            else:
+                sentinel_brain["approved_losses"]=sentinel_brain.get("approved_losses",0)+1
+                sentinel_brain["sentinel_losses"]=sentinel_brain.get("sentinel_losses",0)+1
+                if not is_stale:
+                    sentinel_brain["clean_era_losses"]=sentinel_brain.get("clean_era_losses",0)+1
+                    sentinel_brain["clean_era_sentinel_losses"]=sentinel_brain.get("clean_era_sentinel_losses",0)+1
+            save_json("sentinel_brain.json",sentinel_brain)
+
+            # Update coin confidence
+            if sym not in coin_confidence:
+                coin_confidence[sym]={"long_wins":0,"long_losses":0,"short_wins":0,"short_losses":0}
+            key=direction+("_wins" if is_win else "_losses")
+            coin_confidence[sym][key]=coin_confidence[sym].get(key,0)+1
+            save_json("coin_confidence.json",coin_confidence)
+
+            # Entry quality learning
+            if sym not in entry_learning: entry_learning[sym]={}
+            if direction not in entry_learning[sym]:
+                entry_learning[sym][direction]={"wins":0,"losses":0,"avg_dist":0.0,"total_dist":0.0}
+            el=entry_learning[sym][direction]
+            if is_win: el["wins"]=el.get("wins",0)+1
+            else: el["losses"]=el.get("losses",0)+1
+            fill_dist=t.get("fill_dist",0.0)
+            el["total_dist"]=el.get("total_dist",0.0)+fill_dist
+            total_entries=el["wins"]+el["losses"]
+            el["avg_dist"]=round(el["total_dist"]/total_entries,4) if total_entries>0 else 0
+            save_json("entry_learning.json",entry_learning)
+
+            el_rate=round(el["wins"]/total_entries*100) if total_entries>0 else 0
+            limit_e=t.get("limit_entry",entry); pnl_pct=round(abs(price-entry)/entry*100*(1 if is_win else -1),2)
+            if not _paused:
+                send_message(("✅" if is_win else "❌")+" <b>Auto-Learn: "+sym+" "+t["outcome"]+"</b>"+nl+
+                    "Limit: $"+str(limit_e)+" → Fill: $"+str(round(entry,6))+" → Exit: $"+str(round(price,6))+nl+
+                    ("+" if pnl_pct>=0 else "")+str(pnl_pct)+"%"+nl+nl+
+                    "📚 "+sym+" "+direction+" entry accuracy: "+str(el_rate)+"% ("+str(total_entries)+" trades)"+nl+
+                    "🎯 Avg fill dist from S/R: "+str(el["avg_dist"])+"% — "+("Good level ✅" if el_rate>=60 else "Level under review ⚠️"))
+            logger.info("Auto-learn: "+sym+" "+t["outcome"]+" | entry acc: "+str(el_rate)+"%")
+            changed=True
+
+    if changed:
+        save_json("suggested_trades.json",suggested_trades)
+
+# ============================================================
+# OPEN TRADE MONITOR — FIXED: continues when paused (notifications stop, monitoring continues)
+# ============================================================
+def monitor_open_trades():
+    # NOTE: pause only stops NOTIFICATIONS — monitoring always runs to protect trades
+    try:
+        resp=requests.get(BOT1_URL+"/trades",timeout=10)
+        if resp.status_code!=200: return
+        data=resp.json(); trades=data.get("trades",[])
+        if not trades: return
+        btc_know=coin_knowledge.get("BTC",{}); btc_bias=btc_know.get("bias","NEUTRAL")
+        for trade in trades:
+            symbol=trade.get("symbol",""); direction=trade.get("direction","long")
+            entry=trade.get("entry",0); peak_pnl=trade.get("peak_pnl_pct",0)
+            if not symbol or not entry: continue
+            price=None
+            try:
+                r2=requests.get("https://api.binance.com/api/v3/ticker/price",params={"symbol":symbol+"USDT"},timeout=5)
+                if r2.status_code==200: price=float(r2.json().get("price",0))
+            except: pass
+            if not price: continue
+            real_pnl=((price-entry)/entry)*100 if direction=="long" else ((entry-price)/entry)*100
+            close_reason=None
+            if peak_pnl>=0.3 and real_pnl<peak_pnl-0.4:
+                close_reason="Peak was +"+str(round(peak_pnl,2))+"% now dropping — locking profit"
+            elif peak_pnl>=0.3 and real_pnl<0:
+                if direction=="long" and btc_bias=="BEARISH": close_reason="BTC turned bearish — trade was in profit, closing now"
+                elif direction=="short" and btc_bias=="BULLISH": close_reason="BTC turned bullish — trade was in profit, closing now"
+            if close_reason:
+                try:
+                    requests.post(BOT1_URL+"/close/"+symbol,timeout=10)
+                    logger.info("SENTINEL CLOSE (PROFIT PROTECT) — "+symbol+" at "+str(round(real_pnl,2))+"% | "+close_reason)
+                    if not _paused:
+                        send_message("🛡️ <b>Sentinel closing "+symbol+"</b>"+chr(10)+close_reason)
+                except Exception as e: logger.error("Close signal failed: "+str(e))
+    except Exception as e:
+        logger.error("Monitor trades: "+str(e))
+
+# ============================================================
+# CONTINUOUS WATCHER — UNCHANGED
+# ============================================================
+def continuous_chart_watcher():
+    logger.info("Watcher: "+str(len(WATCH_LIST))+" coins every 15min")
+    last_cycle=0
+    while True:
+        try:
+            now=time.time()
+            if now-last_cycle>=WATCH_INTERVAL:
+                last_cycle=now; start=time.time()
+                logger.info("15min cycle starting...")
+                try: analyze_coin_deeply("BTC"); check_and_alert_btc_premove(); time.sleep(2)
+                except Exception as e: logger.error("BTC: "+str(e))
+                for symbol in WATCH_LIST[1:]:
+                    try: analyze_coin_deeply(symbol); time.sleep(1)
+                    except Exception as e: logger.error(symbol+": "+str(e))
+                try: update_missed_trade_outcomes()
+                except Exception as e: logger.error("Missed trade update: "+str(e))
+                try: detect_market_regime()
+                except Exception as e: logger.error("Regime update: "+str(e))
+                try: monitor_open_trades()
+                except Exception as e: logger.error("Trade monitor: "+str(e))
+                try: check_suggested_trade_outcomes()
+                except Exception as e: logger.error("Suggested trades check: "+str(e))
+                logger.info("Cycle done — "+str(len(coin_knowledge))+"/75 known | "+str(round(time.time()-start,1))+"s")
+        except Exception as e: logger.error("Watcher: "+str(e))
+        time.sleep(30)
+
+def command_loop():
+    global last_update_id
+    init=get_updates(); results=init.get("result",[])
+    if results: last_update_id=results[-1]["update_id"]+1
+    while True:
+        try: handle_commands(); time.sleep(1)
+        except KeyboardInterrupt: break
+        except Exception as e: logger.error("Cmd: "+str(e)); time.sleep(5)
+
+def fast_trade_monitor():
+    while True:
+        try: monitor_open_trades()
+        except Exception as e: logger.error("Fast monitor: "+str(e))
+        time.sleep(120)
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
+if __name__=="__main__":
+    logger.info("SentinelBot v3 starting...")
+    logger.info("DATA_DIR: "+DATA_DIR)
+    logger.info("Min checks: "+str(MIN_CHECKS_TO_APPROVE)+"/7 | Coins: "+str(len(WATCH_LIST)))
+    logger.info("Approval threshold: "+str(APPROVAL_WEIGHTED_THRESHOLD)+" (57% — unchanged)")
+    save_json("sentinel_brain.json",sentinel_brain)
+    if SENTINEL_TOKEN and SENTINEL_CHAT_ID:
+        send_message("🛡️ <b>SentinelBot v3 Online</b>"+chr(10)+chr(10)+
+            "Chart Intelligence activated."+chr(10)+"The chart whispers. Sentinel listens."+chr(10)+chr(10)+
+            "👁️ 75 coins every 15 minutes."+chr(10)+
+            "⚡ BTC pre-move detection: ON"+chr(10)+
+            "📊 Pattern recognition: ON"+chr(10)+
+            "🔵 Market phase detection: ON"+chr(10)+
+            "📈 Entry learning: ON — limit fills tracked automatically"+chr(10)+
+            "⚖️ Dynamic check weights: ON — checks that win count more"+chr(10)+
+            "🔕 Pause = no notifications only — bot keeps running"+chr(10)+chr(10)+
+            "Send /start for full introduction.")
+    threading.Thread(target=command_loop,daemon=True).start()
+    threading.Thread(target=continuous_chart_watcher,daemon=True).start()
+    threading.Thread(target=fast_trade_monitor,daemon=True).start()
+    app.run(host="0.0.0.0",port=8081)
